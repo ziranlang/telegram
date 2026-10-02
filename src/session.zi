@@ -196,6 +196,9 @@ Difference :: () -> bool {
         rows=FieldAt(reply,0,"other_updates");for i: 0..ArrayCount(reply,rows)-1 { Update(E.Raw(reply,ElementAt(reply,rows,i))) }
         State(E.Raw(reply,FieldAt(reply,0,ifx kind=="updates.differenceSlice" then "intermediate_state" else "state")))
         if kind=="updates.difference" { return true }
+        // Drain large differences between pages instead of overflowing the
+        // consumer queue. The next request resumes at intermediate_state.
+        if (tail-head+8192)%8192>4096 { return false }
     };return false
 }
 ChannelDifference :: (slot: s32) -> bool {
@@ -330,14 +333,19 @@ Receive :: (timeout: float64) -> string {
     if head == tail && account.state == "ready" {
         // Only checkpoint after callers have drained and applied the queue.
         // A crash before then safely replays updates from the previous cursor.
-        Checkpoint();unused Save()
+        if !overflow { Checkpoint();unused Save() }
         if account.client.connection.error!="" {
             if !RPC.Connect(*account.client,account.client.connection.dc,account.client.connection.test) { return "" };account.client.gap=true
         }
         unused RPC.Poll(*account.client, cast(s32)(timeout * 1000.0))
         while true { update := RPC.NextUpdate(*account.client); if update == "" { break }; Update(update) }
         if account.client.gap || overflow || MT.Now()>=next_difference {
-            if Difference() { account.client.gap=false;overflow=false;next_difference=MT.Now()+30 }
+            if overflow {
+                pts=saved_pts;qts=saved_qts;date=saved_date;seq=saved_seq
+                for i: 0..peer_count-1 { if channel_saved[i]>0 { channel_pts[i]=channel_saved[i];channel_gap[i]=true } }
+                overflow=false
+            }
+            if Difference() { account.client.gap=false;next_difference=MT.Now()+30 }
             else { next_difference=MT.Now()+5 }
         }
         for i: 0..peer_count-1 { if channel_gap[i] && ChannelDifference(i) { channel_gap[i]=false } }
