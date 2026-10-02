@@ -1,0 +1,9 @@
+Client :: #import "client";
+E :: #import "encoding";
+Main :: () -> s32 {
+    client: Client.Client;client.api_id=94575;client.device="Ziran protocol conformance"
+    if !Client.Connect(*client,2,true) { print("FAIL connection: %\n",client.connection.error);return 1 }
+    reply:=Client.Request(*client,"{\"@type\":\"help.getConfig\"}")
+    if E.Kind(reply)!="config" { print("FAIL RPC: %\n",reply);return 1 }
+    print("Ziran encrypted Telegram config RPC passed\n");return 0
+}

@@ -1,0 +1,120 @@
+// Account authorization over the Ziran MTProto client. The caller stores
+// Snapshot in private storage; phone codes and passwords are never persisted.
+RPC :: #import "client";
+MT :: #import "mtproto";
+E :: #import "encoding";
+Crypto :: #import "crypto/crypto";
+Hash :: #import "crypto/sha256";
+Sha1 :: #import "crypto/sha1";
+Sha512 :: #import "crypto/sha512";
+Big :: #import "crypto/bigint";
+Random :: #import "std/random_linux";
+#import "std/json_scan"
+#import "std/text"
+#import "std/byte_text_linux"
+Account :: struct {
+    client: RPC.Client; phone: string; code_hash: string; state: string
+    user: string; error: string; password_parameters: string; qr: string; qr_expires: s64
+}
+HashBytes :: (bytes: []u8, output: []u8) { unused Hash.Sha256(*bytes[0], bytes.count, *output[0]) }
+Salted :: (data: []u8, salt: []u8, output: []u8) {
+    context: Hash.Sha256Context; Hash.Sha256Initialize(*context)
+    if salt.count > 0 { Hash.Sha256Update(*context, *salt[0], salt.count) }
+    if data.count > 0 { Hash.Sha256Update(*context, *data[0], data.count) }
+    if salt.count > 0 { Hash.Sha256Update(*context, *salt[0], salt.count) }
+    Hash.Sha256Finish(*context, *output[0])
+}
+PasswordProof :: (parameters: string, password: string, entropy: []u8) -> string {
+    algo := FieldAt(parameters, 0, "current_algo")
+    if E.String(parameters, algo, "@type") != "passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow" || entropy.count != 256 { return "" }
+    salt1: [1024]u8; salt2: [1024]u8; prime: [256]u8; b: [256]u8; generator: [256]u8
+    n1 := E.Unbase64(E.String(parameters, algo, "salt1"), salt1[:]); n2 := E.Unbase64(E.String(parameters, algo, "salt2"), salt2[:])
+    if n1 < 0 || n2 < 0 || E.Unbase64(E.String(parameters, algo, "p"), prime[:]) != 256 || E.Hex(prime[:]) != MT.Prime { return "" }
+    raw_b: [256]u8; length := E.Unbase64(E.String(parameters, 0, "srp_B"), raw_b[:])
+    if length <= 0 { return "" }; for i: 0..length - 1 { b[256 - length + i] = raw_b[i] }
+    g := cast(s32)E.Number(parameters, algo, "g"); if g < 2 || g > 7 { return "" }; generator[255] = cast(u8)g
+    modulus := Big.Prepare(prime[:]); bi := Big.FromBytes(b[:]); zero: Big.Integer
+    if Big.Compare(*bi, *zero) <= 0 || Big.Compare(*bi, *modulus.value) >= 0 { return "" }
+    h1: [32]u8; h2: [32]u8; stretched: [64]u8; x: [32]u8
+    descriptor := cast(*TextDescriptor)(*password)
+    Salted(BytesFromPointer(descriptor.data, cast(u64)password.count), salt1[:n1], h1[:]); Salted(h1[:], salt2[:n2], h2[:])
+    if !Sha512.Pbkdf2(h2[:], salt1[:n1], 100000, stretched[:]) { return "" }; Salted(stretched[:], salt2[:n2], x[:])
+    a_public: [256]u8; v: [256]u8; k: [32]u8; u: [32]u8; input: [672]u8
+    if !Big.Power(generator[:], entropy, *modulus, a_public[:]) || !MT.ValidDh(prime[:], g, a_public[:]) || !Big.Power(generator[:], x[:], *modulus, v[:]) { return "" }
+    for i: 0..255 { input[i] = prime[i]; input[256 + i] = generator[i] }; HashBytes(input[:512], k[:])
+    for i: 0..255 { input[i] = a_public[i]; input[256 + i] = b[i] }; HashBytes(input[:512], u[:])
+    nonzero: u8; for i: 0..31 { nonzero |= u[i] }; if nonzero == cast(u8)0 { return "" }
+    kv: [256]u8; base: [256]u8; shared: [256]u8
+    if !Big.Product(k[:], v[:], *modulus, kv[:]) || !Big.Difference(b[:], kv[:], *modulus, base[:]) { return "" }
+    // The exponent is an ordinary integer, not reduced modulo p.
+    words: [257]u32; exponent: [257]u8
+    for i: 0..31 { for j: 0..31 { words[i + j] += cast(u32)u[31 - i] * cast(u32)x[31 - j] } }
+    for i: 0..255 { words[i] += cast(u32)entropy[255 - i]; words[i + 1] += words[i] >> cast(u32)8; exponent[256 - i] = cast(u8)words[i] }; exponent[0] = cast(u8)words[256]
+    if !Big.Power(base[:], exponent[:], *modulus, shared[:]) { return "" }
+    hp: [32]u8; hg: [32]u8; hs1: [32]u8; hs2: [32]u8; key: [32]u8; proof: [32]u8
+    HashBytes(prime[:], hp[:]); HashBytes(generator[:], hg[:]); HashBytes(salt1[:n1], hs1[:]); HashBytes(salt2[:n2], hs2[:]); HashBytes(shared[:], key[:])
+    for i: 0..31 { input[i] = hp[i] ^ hg[i]; input[i + 32] = hs1[i]; input[i + 64] = hs2[i]; input[i + 608] = key[i] }
+    for i: 0..255 { input[i + 96] = a_public[i]; input[i + 352] = b[i] }; HashBytes(input[:640], proof[:])
+    Crypto.Wipe(h1[:]); Crypto.Wipe(h2[:]); Crypto.Wipe(stretched[:]); Crypto.Wipe(x[:]); Crypto.Wipe(shared[:]); Crypto.Wipe(exponent[:]); Crypto.Wipe(key[:])
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"inputCheckPasswordSRP\",\"srp_id\":%,\"A\":%,\"M1\":%}", E.Number(parameters, 0, "srp_id"), E.Quote(E.Base64(a_public[:])), E.Quote(E.Base64(proof[:]))); return BuilderFinish(out)
+}
+Snapshot :: (account: *Account) -> string {
+    out: Vec(u8); BuilderPrint(*out, "{\"format\":1,\"dc\":%,\"test\":%,\"key\":%,\"salt\":%,\"user\":%}", account.client.connection.dc, ifx account.client.connection.test then "true" else "false", E.Quote(E.Hex(account.client.connection.key[:])), account.client.connection.salt, ifx account.user == "" then "null" else account.user); return BuilderFinish(out)
+}
+Restore :: (account: *Account, snapshot: string) -> bool {
+    if E.Number(snapshot, 0, "format") != 1 { return false }; dc := cast(s32)E.Number(snapshot, 0, "dc")
+    test := E.Raw(snapshot, FieldAt(snapshot, 0, "test")); if dc < 1 || dc > 5 || (test != "true" && test != "false") { return false }
+    key: [256]u8; hash: [20]u8
+    if !E.Unhex(E.String(snapshot, 0, "key"), key[:]) { return false }; unused Sha1.Sha1(key[:], hash[:])
+    account.client.connection.key = key; account.client.connection.key_id = MT.Integer(hash[12:20]); account.client.connection.ready = true
+    account.client.connection.salt = E.Number(snapshot, 0, "salt"); account.client.connection.dc = dc; account.client.connection.test = test == "true"
+    user := E.Raw(snapshot, FieldAt(snapshot, 0, "user")); if user != "null" && E.Number(user, 0, "id") > 0 { account.user = E.Copy(user) }
+    return true
+}
+Connect :: (account: *Account, api_id: s32, api_hash: string, device: string, snapshot: string = "") -> bool {
+    account.client.api_id = api_id; account.client.api_hash = api_hash; account.client.device = device
+    dc: s32 = 2; test: bool
+    if snapshot != "" { if !Restore(account, snapshot) { account.error = "Telegram session is unreadable; it was preserved"; return false }; dc = account.client.connection.dc; test = account.client.connection.test }
+    if !RPC.Connect(*account.client, dc, test) { account.error = account.client.connection.error; return false }
+    account.state = "phone"
+    if account.user != "" {
+        reply := RPC.Request(*account.client, "{\"@type\":\"users.getUsers\",\"id\":[{\"@type\":\"inputUserSelf\"}]}")
+        if E.Kind(reply) != "rpc_error" { account.state = "ready" }
+        else if E.String(reply, 0, "error_message") != "AUTH_KEY_UNREGISTERED" && E.String(reply, 0, "error_message") != "SESSION_REVOKED" { account.error = E.String(reply, 0, "error_message"); return false }
+    }; return true
+}
+Request :: (account: *Account, query: string) -> string {
+    for attempt: 0..3 {
+        reply := RPC.Request(*account.client, query); message := E.String(reply, 0, "error_message"); dc: s32
+        prefixes: [3]string = .{"PHONE_MIGRATE_", "NETWORK_MIGRATE_", "USER_MIGRATE_"}
+        for i: 0..2 { p := prefixes[i]; if message.count > p.count && message[:p.count] == p { dc = cast(s32)E.Integer(message[p.count:]) } }
+        if dc == 0 || dc == account.client.connection.dc { return reply }
+        if account.state == "ready" { return RPC.Error(303, "Account migration requires sign-in again") }
+        account.client.connection.ready = false; Crypto.Wipe(account.client.connection.key[:])
+        if !RPC.Connect(*account.client, dc, account.client.connection.test) { return RPC.Error(-1, account.client.connection.error) }
+    }; return RPC.Error(-1, "Telegram sign-in migration limit reached")
+}
+Advance :: (account: *Account, reply: string) -> bool {
+    kind := E.Kind(reply); account.error = ""
+    if kind == "auth.sentCodeSuccess" || kind == "auth.loginTokenSuccess" { return Advance(account, E.Raw(reply, FieldAt(reply, 0, "authorization"))) }
+    if kind == "auth.authorization" { account.user = E.Copy(E.Raw(reply, FieldAt(reply, 0, "user"))); account.state = "ready"; return true }
+    if kind == "auth.sentCode" { account.code_hash = E.String(reply, 0, "phone_code_hash"); account.state = "code"; return true }
+    account.error = E.String(reply, 0, "error_message")
+    if account.error == "SESSION_PASSWORD_NEEDED" {
+        account.password_parameters = Request(account, "{\"@type\":\"account.getPassword\"}")
+        if E.Kind(account.password_parameters) == "account.password" { account.state = "password"; account.error = ""; return true }
+    }; return false
+}
+Phone :: (account: *Account, phone: string) -> bool {
+    account.phone = E.Copy(phone); out: Vec(u8)
+    BuilderPrint(*out, "{\"@type\":\"auth.sendCode\",\"phone_number\":%,\"api_id\":%,\"api_hash\":%,\"settings\":{\"@type\":\"codeSettings\"}}", E.Quote(phone), account.client.api_id, E.Quote(account.client.api_hash)); return Advance(account, Request(account, BuilderFinish(out)))
+}
+Code :: (account: *Account, code: string) -> bool {
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"auth.signIn\",\"phone_number\":%,\"phone_code_hash\":%,\"phone_code\":%}", E.Quote(account.phone), E.Quote(account.code_hash), E.Quote(code)); return Advance(account, Request(account, BuilderFinish(out)))
+}
+Password :: (account: *Account, password: string) -> bool {
+    entropy: [256]u8; if !Random.FillSecure(entropy[:]) { account.error = "Secure randomness unavailable"; return false }
+    proof := PasswordProof(account.password_parameters, password, entropy[:]); Crypto.Wipe(entropy[:])
+    if proof == "" { account.error = "Telegram password parameters were rejected"; return false }
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"auth.checkPassword\",\"password\":%}", proof); return Advance(account, Request(account, BuilderFinish(out)))
+}

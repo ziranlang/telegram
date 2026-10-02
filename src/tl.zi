@@ -1,0 +1,121 @@
+// Bounded, schema-driven TL binary serialization. It preserves signed 64-bit
+// integers and optional fields without a JavaScript/JSON-number round trip.
+Schema :: #import "schema";
+E :: #import "encoding";
+#import "std/text"
+#import "std/json_scan"
+#import "std/byte_text_linux"
+Definition :: struct { name: string; id: u32; fields: string; result: string; }
+definitions: [4096]Definition;
+definition_count: s32;
+initialized: bool;
+Buffer :: struct { bytes: []u8; at: s32; valid: bool; size: s32; }
+Start :: (bytes: []u8) -> Buffer { result: Buffer; result.bytes=bytes; result.valid=true; return result }
+Find :: (text: string, needle: u8, start: s32) -> s32 { for i: start..cast(s32)text.count-1 { if text[i]==needle { return cast(s32)i } }; return -1 }
+Init :: () -> bool {
+    if initialized { return true }; at: s32=0; text:=Schema.Text()
+    while at<text.count {
+        end:=Find(text,10,at); if end<0 { end=cast(s32)text.count }; line:=text[at:end]; hash:=Find(line,35,0); space:=Find(line,32,hash+1); equal:=Find(line,61,space+1)
+        if hash>0 && space>hash && equal>space {
+            if definition_count>=4096 { return false }; id: u32
+            for i: hash+1..space-1 { digit:=E.Nibble(line[i]); if digit<0 { return false }; id=(id<<cast(u32)4)|cast(u32)digit }
+            if line[:hash]!="vector" { definitions[definition_count].name=line[:hash]; definitions[definition_count].id=id; definitions[definition_count].fields=line[space+1:equal]; definitions[definition_count].result=E.Trim(line[equal+1:cast(s32)line.count-1]); definition_count+=1 }
+        }; at=end+1
+    }; initialized=true; return definition_count>0
+}
+ByName :: (name: string) -> s32 { for i: 0..definition_count-1 { if definitions[i].name==name { return cast(s32)i } }; return -1 }
+ById :: (id: u32) -> s32 { for i: 0..definition_count-1 { if definitions[i].id==id { return cast(s32)i } }; return -1 }
+Byte :: (buffer: *Buffer, value: u8) { if !buffer.valid || buffer.at>=buffer.bytes.count { buffer.valid=false; return }; buffer.bytes[buffer.at]=value; buffer.at+=1 }
+ReadByte :: (buffer: *Buffer) -> u8 { if !buffer.valid || buffer.at>=buffer.bytes.count { buffer.valid=false; return 0 }; value:=buffer.bytes[buffer.at]; buffer.at+=1; return value }
+Word :: (buffer: *Buffer, value: u32) { for i: 0..3 { Byte(buffer,cast(u8)(value>>cast(u32)(i*8))) } }
+ReadWord :: (buffer: *Buffer) -> u32 { value: u32; for i: 0..3 { value |= cast(u32)ReadByte(buffer)<<cast(u32)(i*8) }; return value }
+Long :: (buffer: *Buffer, value: s64) { v:=cast(u64)value; for i: 0..7 { Byte(buffer,cast(u8)(v>>cast(u64)(i*8))) } }
+ReadLong :: (buffer: *Buffer) -> s64 { value: u64; for i: 0..7 { value |= cast(u64)ReadByte(buffer)<<cast(u64)(i*8) }; return cast(s64)value }
+Bytes :: (buffer: *Buffer, value: []u8) {
+    if value.count>1048576 { buffer.valid=false; return }
+    header: s32=1
+    if value.count<254 { Byte(buffer,cast(u8)value.count) } else { header=4; Byte(buffer,254); for i: 0..2 { Byte(buffer,cast(u8)(cast(u32)value.count>>cast(u32)(i*8))) } }
+    for i: 0..cast(s32)value.count-1 { Byte(buffer,value[i]) }; padding: s32=cast(s32)((value.count+header)%4); if padding>0 { for i: padding..3 { Byte(buffer,0) } }
+}
+ReadBytes :: (buffer: *Buffer) -> s32 {
+    length:=cast(s32)ReadByte(buffer); header: s32=1
+    if length==254 { header=4; length=0; for i: 0..2 { length |= cast(s32)ReadByte(buffer)<<cast(s32)(i*8) }; if length<254 { buffer.valid=false } }
+    else if length==255 { buffer.valid=false }
+    if !buffer.valid || length>1048576 || length>buffer.bytes.count-buffer.at { buffer.valid=false; buffer.size=0; return 0 }
+    value:=buffer.at; buffer.size=length; buffer.at+=length
+    padding: s32=(length+header)%4; if padding>0 { for i: padding..3 { unused ReadByte(buffer) } }; return value
+}
+Field :: struct { name: string; type: string; flag: s32; bit: s32; }
+ParseField :: (token: string) -> Field {
+    result: Field; result.flag=-1; if token.count>0 && token[0]==cast(u8)123 { return result }; colon:=Find(token,58,0); if colon<0 { return result }; result.name=token[:colon]; result.type=token[colon+1:]
+    question:=Find(result.type,63,0)
+    if question>=0 { dot:=Find(result.type,46,0); if dot<0 || dot>=question { result.name=""; return result }; result.flag=0; if result.type[:dot]=="flags2" { result.flag=1 }; result.bit=cast(s32)E.Integer(result.type[dot+1:question]); result.type=result.type[question+1:] }
+    return result
+}
+Next :: (text: string, at: *s32) -> string { while at.*<text.count && text[at.*]==cast(u8)32 { at.*+=1 }; start:=at.*; while at.*<text.count && text[at.*]!=cast(u8)32 { at.*+=1 }; return text[start:at.*] }
+EncodeText :: (buffer: *Buffer, kind: string, json: string, at: s32) {
+    if kind=="string" { bytes: [1048576]u8; count:=ReadStringText(json,at,bytes[:]); if count<0 { buffer.valid=false; return }; Bytes(buffer,bytes[:count]); return }
+    if kind=="bytes" || kind=="int128" || kind=="int256" {
+        text: [1048576]u8; count:=ReadStringText(json,at,text[:]); if count<0 { buffer.valid=false; return }; value:=TextFromBytes(text[:count]); bytes: [1048576]u8
+        if kind=="bytes" { used:=E.Unbase64(value,bytes[:]); if used<0 { buffer.valid=false; return }; Bytes(buffer,bytes[:used]) }
+        else { used: s32=16; if kind=="int256" { used=32 }; if !E.Unhex(value,bytes[:used]) { buffer.valid=false; return }; for i: 0..used-1 { Byte(buffer,bytes[i]) } }; return
+    }
+}
+EncodeType :: (buffer: *Buffer, kind: string, json: string, at: s32, depth: s32) {
+    if depth>64 || at<0 { buffer.valid=false; return }
+    if kind=="int" || kind=="#" { Word(buffer,cast(u32)E.Integer(E.Raw(json,at))); return }
+    if kind=="long" { Long(buffer,E.Integer(E.Raw(json,at))); return }
+    if kind=="true" { return }
+    if kind=="Bool" { Word(buffer,ifx E.Raw(json,at)=="true" then cast(u32)0x997275b5 else cast(u32)0xbc799737); return }
+    if kind=="string" || kind=="bytes" || kind=="int128" || kind=="int256" { EncodeText(buffer, kind, json, at); return }
+    angle:=Find(kind,60,0)
+    if angle>0 {
+        if kind[:angle]=="Vector" { Word(buffer,0x1cb5c415) }
+        count:=ArrayCount(json,at); if count>65536 || json[at]!=cast(u8)91 { buffer.valid=false; return }; Word(buffer,cast(u32)count)
+        for i: 0..count-1 { EncodeType(buffer,kind[angle+1:cast(s32)kind.count-1],json,ElementAt(json,at,cast(s32)i),depth+1) }; return
+    }
+    name:=E.String(json,at,"@type"); index:=ByName(name); if index<0 { buffer.valid=false; return }
+    Word(buffer,definitions[index].id); fields:=definitions[index].fields; flags: [2]u32; cursor: s32
+    while cursor<fields.count {
+        field:=ParseField(Next(fields,*cursor)); if field.name=="" || field.flag<0 { continue }
+        value:=E.Raw(json,FieldAt(json,at,field.name)); if value!="" && value!="null" && (field.type!="true" || value=="true") { flags[field.flag] |= cast(u32)1<<cast(u32)field.bit }
+    }; cursor=0
+    while cursor<fields.count && buffer.valid {
+        field:=ParseField(Next(fields,*cursor)); if field.name=="" { continue }
+        if field.type=="#" { slot: s32=0; if field.name=="flags2" { slot=1 }; Word(buffer,flags[slot]); continue }
+        if field.flag>=0 && (flags[field.flag]&(cast(u32)1<<cast(u32)field.bit))==cast(u32)0 { continue }
+        EncodeType(buffer,field.type,json,FieldAt(json,at,field.name),depth+1)
+    }
+}
+DecodeType :: (buffer: *Buffer, kind: string, out: *Vec(u8), depth: s32) {
+    if depth>64 || !buffer.valid { buffer.valid=false; return }
+    if kind=="int" || kind=="#" { BuilderPrint(out,"%",cast(s32)ReadWord(buffer)); return }
+    if kind=="long" { BuilderPrint(out,"%",ReadLong(buffer)); return }
+    if kind=="true" { BuilderPrint(out,"true"); return }
+    if kind=="string" || kind=="bytes" { start:=ReadBytes(buffer); value:=buffer.bytes[start:start+buffer.size]; if kind=="string" { BuilderPrint(out,"%",E.Quote(TextFromBytes(value))) } else { BuilderPrint(out,"%",E.Quote(E.Base64(value))) }; return }
+    if kind=="int128" || kind=="int256" { used: s32=16; if kind=="int256" { used=32 }; if buffer.at+used>buffer.bytes.count { buffer.valid=false; return }; BuilderPrint(out,"%",E.Quote(E.Hex(buffer.bytes[buffer.at:buffer.at+used]))); buffer.at+=used; return }
+    angle:=Find(kind,60,0)
+    if angle>0 {
+        if kind[:angle]=="Vector" && ReadWord(buffer)!=cast(u32)0x1cb5c415 { buffer.valid=false; return }
+        count:=ReadWord(buffer); if count>cast(u32)65536 { buffer.valid=false; return }; BuilderPrint(out,"[")
+        for i: 0..cast(s32)count-1 { if i>0 { BuilderPrint(out,",") }; DecodeType(buffer,kind[angle+1:cast(s32)kind.count-1],out,depth+1) }; BuilderPrint(out,"]"); return
+    }
+    id:=ReadWord(buffer)
+    if id==cast(u32)0x997275b5 { BuilderPrint(out,"true"); return }; if id==cast(u32)0xbc799737 { BuilderPrint(out,"false"); return }
+    index:=ById(id); if index<0 { buffer.valid=false; return }
+    BuilderPrint(out,"{\"@type\":%",E.Quote(definitions[index].name)); fields:=definitions[index].fields; cursor: s32; flags: [2]u32
+    while cursor<fields.count && buffer.valid {
+        field:=ParseField(Next(fields,*cursor)); if field.name=="" { continue }
+        if field.type=="#" { slot: s32=0; if field.name=="flags2" { slot=1 }; flags[slot]=ReadWord(buffer); continue }
+        if field.flag>=0 && (flags[field.flag]&(cast(u32)1<<cast(u32)field.bit))==cast(u32)0 { continue }
+        BuilderPrint(out,",%:",E.Quote(field.name)); DecodeType(buffer,field.type,out,depth+1)
+    }; BuilderPrint(out,"}")
+}
+Encode :: (json: string, bytes: []u8) -> s32 { if !Init() { return -1 }; buffer:=Start(bytes); EncodeType(*buffer,"Object",json,0,0); if !buffer.valid { return -1 }; return buffer.at }
+Decode :: (bytes: []u8) -> string { if !Init() { return "" }; buffer:=Start(bytes); out: Vec(u8); DecodeType(*buffer,"Object",*out,0); if !buffer.valid || buffer.at!=bytes.count { return "" }; return BuilderFinish(out) }
+DecodeResponse :: (method: string, bytes: []u8) -> string {
+    if !Init() { return "" }; index:=ByName(method); kind: string="Object"
+    if index>=0 && definitions[index].result!="X" { kind=definitions[index].result }
+    buffer:=Start(bytes); out: Vec(u8); DecodeType(*buffer,kind,*out,0)
+    if !buffer.valid || buffer.at!=bytes.count { return "" }; return BuilderFinish(out)
+}

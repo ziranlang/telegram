@@ -1,0 +1,6 @@
+MT :: #import "mtproto";
+Main :: () -> s32 {
+    connection: MT.Connection
+    if !MT.Open(*connection,2,true) || !MT.KeyExchange(*connection) { print("Telegram test-DC handshake failed: %\n",connection.error);return 1 }
+    print("Ziran MTProto authenticated test-DC handshake passed\n");return 0
+}

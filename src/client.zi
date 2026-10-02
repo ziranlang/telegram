@@ -1,0 +1,94 @@
+// A synchronous RPC client with a separately drainable update queue. The
+// caller owns one Client and calls it from one thread. API methods are TL
+// objects; bytes fields use base64 and int128/int256 fields use hex.
+MT :: #import "mtproto";
+TL :: #import "tl";
+E :: #import "encoding";
+Schema :: #import "schema";
+Inflate :: #import "compression/inflate";
+#import "std/text"
+#import "std/json_scan"
+#import "std/byte_text_linux"
+c :: #system_library "libc";
+Allocate :: (count: usize, size: usize) -> *u8 #foreign c "calloc";
+Free :: (bytes: *u8) #foreign c "free";
+Client :: struct {
+    connection: MT.Connection; api_id: s32; api_hash: string; device: string
+    initialized: bool; response: string; pending: s64; method: string
+    retry: bool; updates: [256]string; head: s32; tail: s32; gap: bool
+}
+Error :: (code: s32,message: string) -> string { out: Vec(u8);BuilderPrint(*out,"{\"@type\":\"rpc_error\",\"error_code\":%,\"error_message\":%}",code,E.Quote(message));return BuilderFinish(out) }
+Connect :: (client: *Client,dc: s32,test: bool) -> bool {
+    client.initialized=false
+    if !MT.Open(*client.connection,dc,test) { return false }
+    if !client.connection.ready && !MT.KeyExchange(*client.connection) { return false };return true
+}
+Queue :: (client: *Client,value: string) {
+    next: s32=(client.tail+1)%256;if next==client.head { client.gap=true;return };client.updates[client.tail]=value;client.tail=next
+}
+NextUpdate :: (client: *Client) -> string {
+    if client.head==client.tail { return "" };value:=E.Copy(client.updates[client.head]);client.updates[client.head]="";client.head=(client.head+1)%256;return value
+}
+Send :: (client: *Client,json: string,content: bool) -> s64 {
+    body_memory := Allocate(1048576,1); packet_memory := Allocate(1048576,1); if body_memory == null || packet_memory == null { Free(body_memory); Free(packet_memory); return 0 }; defer { Free(body_memory); Free(packet_memory) }; body := BytesFromPointer(body_memory,1048576); packet := BytesFromPointer(packet_memory,1048576);count:=TL.Encode(json,body[:]);if count<0 { client.connection.error="Telegram request cannot be encoded";return 0 }
+    size:=MT.Encrypt(*client.connection,body[:count],content,packet[:]);id:=client.connection.last_id
+    if size<0 || !MT.SendPacket(*client.connection,packet[:size]) { return 0 };return id
+}
+Ack :: (client: *Client,id: s64) { out: Vec(u8);BuilderPrint(*out,"{\"@type\":\"msgs_ack\",\"msg_ids\":[%]}",id);unused Send(client,BuilderFinish(out),false) }
+Unpack :: (body: []u8,output: []u8) -> s32 {
+    reader:=TL.Start(body);if TL.ReadWord(*reader)!=cast(u32)0x3072cfa1 { return -1 };start:=TL.ReadBytes(*reader)
+    if !reader.valid || reader.at!=body.count { return -1 };return Inflate.Gzip(body[start:start+reader.size],output)
+}
+Handle :: (client: *Client,body: []u8,server_id: s64,depth: s32) {
+    if depth>8 || body.count<4 { client.gap=true;return };reader:=TL.Start(body);constructor:=TL.ReadWord(*reader)
+    if constructor==cast(u32)0x73f1f8dc {
+        count:=TL.ReadWord(*reader);if count>cast(u32)1024 { client.gap=true;return }
+        for i: 0..cast(s32)count-1 {
+            id:=TL.ReadLong(*reader);sequence:=TL.ReadWord(*reader);length:=cast(s32)TL.ReadWord(*reader)
+            if !reader.valid || length<4 || length%4!=0 || length>body.count-reader.at { client.gap=true;return }
+            Handle(client,body[reader.at:reader.at+length],id,depth+1);reader.at+=length;if (sequence&cast(u32)1)!=cast(u32)0 { Ack(client,id) }
+        };return
+    }
+    if constructor==cast(u32)0x3072cfa1 { storage := Allocate(1048576,1); if storage == null { client.gap=true; return }; defer { Free(storage) }; bytes := BytesFromPointer(storage,1048576);count:=Unpack(body,bytes[:]);if count<0 { client.gap=true;return };Handle(client,bytes[:count],server_id,depth+1);return }
+    if constructor==cast(u32)0xf35c6d01 {
+        id:=TL.ReadLong(*reader);if id!=client.pending { return };payload:=body[reader.at:];nested:=TL.Start(payload);kind:=TL.ReadWord(*nested)
+        if kind==cast(u32)0x3072cfa1 { storage := Allocate(1048576,1); if storage == null { client.gap=true; return }; defer { Free(storage) }; bytes := BytesFromPointer(storage,1048576);count:=Unpack(payload,bytes[:]);if count<0 { client.response=Error(-1,"Invalid compressed Telegram response");return };probe:=TL.Start(bytes[:count]);kind=TL.ReadWord(*probe);if kind==cast(u32)0x2144ca19 { client.response=TL.Decode(bytes[:count]) } else { client.response=TL.DecodeResponse(client.method,bytes[:count]) } }
+        else if kind==cast(u32)0x2144ca19 { client.response=TL.Decode(payload) }
+        else { client.response=TL.DecodeResponse(client.method,payload) }
+        if client.response=="" { client.response=Error(-1,"Invalid Telegram response schema") };return
+    }
+    if constructor==cast(u32)0xedab447b {
+        rejected:=TL.ReadLong(*reader);unused TL.ReadWord(*reader);unused TL.ReadWord(*reader);salt:=TL.ReadLong(*reader)
+        if reader.valid && reader.at==body.count { client.connection.salt=salt;if rejected==client.pending { client.retry=true } };return
+    }
+    if constructor==cast(u32)0xa7eff811 {
+        rejected:=TL.ReadLong(*reader);unused TL.ReadWord(*reader);code:=TL.ReadWord(*reader)
+        if rejected==client.pending && (code==cast(u32)16 || code==cast(u32)17 || code==cast(u32)20) { client.connection.clock=cast(s64)(cast(u64)server_id>>cast(u64)32)-MT.Now();client.retry=true }
+        else if rejected==client.pending { client.response=Error(cast(s32)code,"Telegram rejected the message sequence") };return
+    }
+    if constructor==cast(u32)0x9ec20908 { unused TL.ReadLong(*reader);unused TL.ReadLong(*reader);salt:=TL.ReadLong(*reader);if reader.valid { client.connection.salt=salt };return }
+    if constructor==cast(u32)0x62d6b459 || constructor==cast(u32)0x347773c5 { return }
+    value:=TL.Decode(body);if value=="" { client.gap=true;return };Queue(client,value)
+}
+Poll :: (client: *Client,timeout_ms: s32) -> bool {
+    packet_memory := Allocate(1048576,1); plain_memory := Allocate(1048576,1); if packet_memory == null || plain_memory == null { Free(packet_memory); Free(plain_memory); return false }; defer { Free(packet_memory); Free(plain_memory) }; packet := BytesFromPointer(packet_memory,1048576); plain := BytesFromPointer(plain_memory,1048576);size:=MT.ReceivePacket(*client.connection,packet[:],timeout_ms)
+    if size==0 { return false };if size<0 { client.gap=true;return false };length:=MT.Decrypt(*client.connection,packet[:size],plain[:]);if length==-2 { return false }
+    if length<0 { client.connection.error="Telegram packet authentication failed";client.gap=true;return false }
+    reader:=TL.Start(plain[:32]);unused TL.ReadLong(*reader);unused TL.ReadLong(*reader);id:=TL.ReadLong(*reader);sequence:=TL.ReadWord(*reader)
+    Handle(client,plain[32:32+length],id,0);if (sequence&cast(u32)1)!=cast(u32)0 { Ack(client,id) };return true
+}
+Request :: (client: *Client,query: string) -> string {
+    if !client.connection.ready { return Error(-1,"Telegram transport is not connected") };if client.pending!=0 { return Error(-1,"A Telegram request is already in progress") }
+    client.method=E.Kind(query);body:=query
+    if !client.initialized {
+        out: Vec(u8);BuilderPrint(*out,"{\"@type\":\"invokeWithLayer\",\"layer\":%,\"query\":{\"@type\":\"initConnection\",\"api_id\":%,\"device_model\":%,\"system_version\":\"Linux\",\"app_version\":\"1.0\",\"system_lang_code\":\"en\",\"lang_pack\":\"\",\"lang_code\":\"en\",\"query\":%}}",Schema.Layer,client.api_id,E.Quote(client.device),query);body=BuilderFinish(out)
+    }
+    for attempt: 0..2 {
+        client.response="";client.retry=false;client.pending=Send(client,body,true)
+        if client.pending==0 { return Error(-1,client.connection.error) };deadline:=MT.Now()+30
+        while MT.Now()<deadline && client.response=="" && !client.retry { unused Poll(client,500) }
+        if client.retry { continue };client.pending=0
+        if client.response=="" { return Error(-1,"Telegram response was not received; delivery is unknown") }
+        if E.Kind(client.response)!="rpc_error" { client.initialized=true };return E.Copy(client.response)
+    };client.pending=0;return Error(-1,"Telegram transport corrections exhausted")
+}

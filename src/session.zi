@@ -1,0 +1,223 @@
+// One account connection, sign-in state and event queue for CLI/native clients.
+// This small JSON interface is implemented entirely over Ziran MTProto/TL.
+Auth :: #import "auth";
+RPC :: #import "client";
+MT :: #import "mtproto";
+E :: #import "encoding";
+Messages :: #import "messages";
+File :: #import "std/file";
+Random :: #import "std/random_linux";
+#import "std/text"
+#import "std/json_scan"
+#import "std/c_string"
+#import "std/byte_text_linux"
+c :: #system_library "libc";
+OpenRaw :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
+ReadRaw :: (fd: s32, bytes: *u8, size: usize) -> s64 #foreign c "read";
+WriteRaw :: (fd: s32, bytes: *u8, size: usize) -> s64 #foreign c "write";
+CloseRaw :: (fd: s32) -> s32 #foreign c "close";
+SyncRaw :: (fd: s32) -> s32 #foreign c "fsync";
+StatRaw :: (fd: s32, path: *u8, flags: s32, mask: u32, output: *u8) -> s32 #foreign c "statx";
+OwnerRaw :: () -> u32 #foreign c "getuid";
+Join :: (a: string, b: string) -> string { out: Vec(u8); BuilderPrint(*out, "%", a); BuilderPrint(*out, "%", b); return BuilderFinish(out) }
+account: Auth.Account;
+directory: string;
+queue: [8192]string;
+head: s32; tail: s32; overflow: bool;
+peer_ids: [4096]s64; peer_hashes: [4096]s64; peer_count: s32;
+offset_id: [2]s64; offset_date: [2]s64; offset_peer: [2]string;
+pts: s64; qts: s64; date: s64; next_sync: s64;
+started: bool;
+Push :: (value: string) { next := (tail + 1) % 8192; if next == head { overflow = true; return }; queue[tail] = E.Copy(value); tail = next }
+Authorization :: () {
+    state := "authorizationStateWaitPhoneNumber"
+    if account.state == "ready" { state = "authorizationStateReady" }
+    if account.state == "code" { state = "authorizationStateWaitCode" }
+    if account.state == "password" { state = "authorizationStateWaitPassword" }
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateAuthorizationState\",\"authorization_state\":{\"@type\":%}}", E.Quote(state)); Push(BuilderFinish(out))
+}
+Create :: () -> s32 { Push("{\"@type\":\"updateAuthorizationState\",\"authorization_state\":{\"@type\":\"authorizationStateWaitTdlibParameters\"}}"); return 1 }
+Private :: (fd: s32) -> bool {
+    metadata: [256]u8; empty: [1]u8
+    if StatRaw(fd, *empty[0], 4096, 11, *metadata[0]) != 0 { return false }
+    mode := cast(u32)metadata[28] | (cast(u32)metadata[29] << cast(u32)8)
+    owner := cast(u32)metadata[20] | (cast(u32)metadata[21] << cast(u32)8) | (cast(u32)metadata[22] << cast(u32)16) | (cast(u32)metadata[23] << cast(u32)24)
+    return owner == OwnerRaw() && (mode & cast(u32)61440) == cast(u32)32768 && (mode & cast(u32)63) == cast(u32)0
+}
+Load :: () -> string {
+    path: [4096]u8; if !CopyCString(Join(directory, "/account.json"), path[:]) { return "" }
+    fd := OpenRaw(*path[0], 655360, 0); if fd < 0 { return "" }; defer { unused CloseRaw(fd) }
+    if !Private(fd) { return "invalid" }; bytes: [8192]u8; count := ReadRaw(fd, *bytes[0], 8192)
+    if count <= 0 || count >= 8192 { return "invalid" }; return E.Copy(TextFromBytes(bytes[:count]))
+}
+Save :: () -> bool {
+    snapshot := Auth.Snapshot(*account); path: [4096]u8; final: [4096]u8; random: [16]u8
+    if !Random.FillSecure(random[:]) || !CopyCString(Join(directory, Join("/.account-", E.Hex(random[:]))), path[:]) || !CopyCString(Join(directory, "/account.json"), final[:]) { return false }
+    fd := OpenRaw(*path[0], 655553, 384); if fd < 0 { return false }
+    descriptor := cast(*TextDescriptor)(*snapshot); at: s64; ok := true
+    while at < snapshot.count { count := WriteRaw(fd, *descriptor.data[at], cast(usize)(snapshot.count - at)); if count <= 0 { ok = false; break }; at += count }
+    ok = SyncRaw(fd) == 0 && ok; unused CloseRaw(fd)
+    if ok { ok = File.RenamePath(TextFromCString(*path[0]), TextFromCString(*final[0])) }
+    if !ok { unused File.RemoveFile(TextFromCString(*path[0])) }; return ok
+}
+Reply :: (value: string, extra: string) {
+    if extra == "" { Push(value); return }; out: Vec(u8); BuilderPrint(*out, "%,\"@extra\":%}", value[:value.count - 1], E.Quote(extra)); Push(BuilderFinish(out))
+}
+Error :: (text: string, extra: string) { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"error\",\"code\":400,\"message\":%}", E.Quote(text)); Reply(BuilderFinish(out), extra) }
+Cache :: (reply: string) {
+    fields: [2]string = .{"users", "chats"}
+    for field: 0..1 {
+        rows := FieldAt(reply, 0, fields[field])
+        for i: 0..ArrayCount(reply, rows) - 1 {
+            at := ElementAt(reply, rows, i); value := E.Raw(reply, at); kind := E.Kind(value); raw_id := E.Number(value, 0, "id"); id := raw_id
+            if kind == "chat" || kind == "chatForbidden" { id = -raw_id }
+            if kind == "channel" || kind == "channelForbidden" { id = -1000000000000 - raw_id }
+            slot: s32 = -1; for j: 0..peer_count - 1 { if peer_ids[j] == id { slot = j; break } }
+            if slot < 0 && peer_count < 4096 { slot = peer_count; peer_count += 1 }
+            if slot >= 0 { peer_ids[slot] = id; if FieldAt(value, 0, "access_hash") >= 0 { peer_hashes[slot] = E.Number(value, 0, "access_hash") } }
+            if kind == "user" { Push(Join("{\"@type\":\"updateUser\",\"user\":", Join(value, "}"))) }
+        }
+    }
+}
+InputPeer :: (id: s64) -> string {
+    hash: s64; for i: 0..peer_count - 1 { if peer_ids[i] == id { hash = peer_hashes[i]; break } }; out: Vec(u8)
+    if id == E.Number(account.user, 0, "id") { return "{\"@type\":\"inputPeerSelf\"}" }
+    if id > 0 { BuilderPrint(*out, "{\"@type\":\"inputPeerUser\",\"user_id\":%,\"access_hash\":%}", id, hash) }
+    else if id <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"inputPeerChannel\",\"channel_id\":%,\"access_hash\":%}", -1000000000000 - id, hash) }
+    else { BuilderPrint(*out, "{\"@type\":\"inputPeerChat\",\"chat_id\":%}", -id) }; return BuilderFinish(out)
+}
+Request :: (query: string) -> string {
+    reply := Auth.Request(*account, query); Cache(reply); return reply
+}
+Update :: (update: string) {
+    kind := E.Kind(update)
+    if kind == "updates" || kind == "updatesCombined" {
+        Cache(update); rows := FieldAt(update, 0, "updates"); for i: 0..ArrayCount(update, rows) - 1 { Update(E.Raw(update, ElementAt(update, rows, i))) }; date = E.Number(update, 0, "date"); return
+    }
+    if kind == "updateShort" { Update(E.Raw(update, FieldAt(update, 0, "update"))); date = E.Number(update, 0, "date"); return }
+    if kind == "updateNewMessage" || kind == "updateNewChannelMessage" || kind == "updateEditMessage" || kind == "updateEditChannelMessage" {
+        message := E.Raw(update, FieldAt(update, 0, "message")); chat := Messages.ChatId(E.Raw(message, FieldAt(message, 0, "peer_id")))
+        if kind == "updateNewMessage" || kind == "updateNewChannelMessage" { Push(Join("{\"@type\":\"updateNewMessage\",\"message\":", Join(Messages.Normalize(message, chat), "}"))) }
+        else { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateMessageEdited\",\"chat_id\":%,\"message_id\":%}", chat, E.Number(message, 0, "id")); Push(BuilderFinish(out)) }
+    }
+    if kind == "updateReadHistoryInbox" || kind == "updateReadChannelInbox" {
+        chat := Messages.ChatId(E.Raw(update, FieldAt(update, 0, "peer"))); if kind == "updateReadChannelInbox" { chat = -1000000000000 - E.Number(update, 0, "channel_id") }
+        out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateChatReadInbox\",\"chat_id\":%,\"last_read_inbox_message_id\":%,\"unread_count\":%}", chat, E.Number(update, 0, "max_id"), E.Number(update, 0, "still_unread_count")); Push(BuilderFinish(out))
+    }
+    if kind == "updateDeleteChannelMessages" { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateDeleteMessages\",\"chat_id\":%,\"message_ids\":%,\"is_permanent\":true,\"from_cache\":false}", -1000000000000 - E.Number(update, 0, "channel_id"), E.Raw(update, FieldAt(update, 0, "messages"))); Push(BuilderFinish(out)) }
+    if kind == "updateMessageReactions" { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateMessageInteractionInfo\",\"chat_id\":%,\"message_id\":%}", Messages.ChatId(E.Raw(update, FieldAt(update, 0, "peer"))), E.Number(update, 0, "msg_id")); Push(BuilderFinish(out)) }
+    if kind == "updateShortMessage" || kind == "updateShortChatMessage" || kind == "updatesTooLong" || kind == "updateDeleteMessages" { next_sync = 0 }
+    if kind != "updateNewChannelMessage" && kind != "updateEditChannelMessage" && kind != "updateDeleteChannelMessages" && E.Number(update, 0, "pts") > pts { pts = E.Number(update, 0, "pts") }
+}
+Dialogs :: (folder: s32) -> string {
+    peer := E.Copy(offset_peer[folder]); if peer == "" { peer = "{\"@type\":\"inputPeerEmpty\"}" }; out: Vec(u8)
+    BuilderPrint(*out, "{\"@type\":\"messages.getDialogs\",\"folder_id\":%,\"offset_date\":%,\"offset_id\":%,\"offset_peer\":%,\"limit\":100,\"hash\":0}", folder, offset_date[folder], offset_id[folder], peer)
+    reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; rows := FieldAt(reply, 0, "dialogs"); count := ArrayCount(reply, rows)
+    if count <= 0 { return RPC.Error(404, "All Telegram chats loaded") }
+    for i: 0..count - 1 {
+        at := ElementAt(reply, rows, i); id := Messages.ChatId(E.Raw(reply, FieldAt(reply, at, "peer"))); title := "Telegram chat"; type := "chatTypePrivate"
+        if id < 0 { type = "chatTypeBasicGroup" }; if id <= -1000000000000 { type = "chatTypeSupergroup" }
+        list := FieldAt(reply, 0, ifx id > 0 then "users" else "chats"); channel: bool
+        for j: 0..ArrayCount(reply, list) - 1 { item := ElementAt(reply, list, j); raw_id := E.Number(reply, item, "id"); if raw_id == (ifx id > 0 then id else (ifx id <= -1000000000000 then -1000000000000 - id else -id)) { title = E.String(reply, item, ifx id > 0 then "first_name" else "title"); channel = E.Raw(reply, FieldAt(reply, item, "broadcast")) == "true" } }
+        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%}}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false"); Push(BuilderFinish(announce))
+        read_update: Vec(u8); BuilderPrint(*read_update, "{\"@type\":\"updateChatReadInbox\",\"chat_id\":%,\"last_read_inbox_message_id\":%,\"unread_count\":%}", id, E.Number(reply, at, "read_inbox_max_id"), E.Number(reply, at, "unread_count")); Push(BuilderFinish(read_update))
+        if i == count - 1 {
+            offset_id[folder] = E.Number(reply, at, "top_message"); offset_peer[folder] = InputPeer(id); messages := FieldAt(reply, 0, "messages")
+            for j: 0..ArrayCount(reply, messages) - 1 { m := ElementAt(reply, messages, j); if E.Number(reply, m, "id") == offset_id[folder] { offset_date[folder] = E.Number(reply, m, "date") } }
+        }
+    }; return "{\"@type\":\"ok\"}"
+}
+Dispatch :: (request: string) -> string {
+    kind := E.Kind(request); chat := E.Number(request, 0, "chat_id"); message := E.Number(request, 0, "message_id"); peer := InputPeer(chat)
+    if kind == "getMe" { return account.user }
+    if kind == "loadChats" { return Dialogs(ifx E.String(request, FieldAt(request, 0, "chat_list"), "@type") == "chatListArchive" then 1 else 0) }
+    if kind == "getChatMember" {
+        out: Vec(u8)
+        user := E.Number(request, FieldAt(request, 0, "member_id"), "user_id")
+        if chat <= -1000000000000 {
+            full: Vec(u8); BuilderPrint(*full, "{\"@type\":\"channels.getFullChannel\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%}}", -1000000000000 - chat, E.Number(peer, 0, "access_hash")); unused Request(BuilderFinish(full))
+            BuilderPrint(*out, "{\"@type\":\"channels.getParticipant\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"participant\":%}", -1000000000000 - chat, E.Number(peer, 0, "access_hash"), InputPeer(user))
+            reply := Request(BuilderFinish(out)); status := E.String(reply, FieldAt(reply, 0, "participant"), "@type")
+            if E.Kind(reply) != "rpc_error" && status != "channelParticipantLeft" && status != "channelParticipantBanned" { return "{\"@type\":\"chatMember\",\"status\":{\"@type\":\"chatMemberStatusMember\"}}" }
+        } else {
+            group_query: Vec(u8); BuilderPrint(*group_query, "{\"@type\":\"messages.getFullChat\",\"chat_id\":%}", -chat); reply := Request(BuilderFinish(group_query))
+            list := FieldAt(reply, FieldAt(reply, FieldAt(reply, 0, "full_chat"), "participants"), "participants")
+            for i: 0..ArrayCount(reply, list) - 1 { if E.Number(reply, ElementAt(reply, list, i), "user_id") == user { return "{\"@type\":\"chatMember\",\"status\":{\"@type\":\"chatMemberStatusMember\"}}" } }
+        }; return RPC.Error(404, "Telegram member is absent")
+    }
+    if kind == "getChatHistory" || kind == "getMessage" {
+        out: Vec(u8)
+        if kind == "getChatHistory" { BuilderPrint(*out, "{\"@type\":\"messages.getHistory\",\"peer\":%,\"offset_id\":%,\"offset_date\":0,\"add_offset\":0,\"limit\":100,\"max_id\":0,\"min_id\":0,\"hash\":0}", peer, E.Number(request, 0, "from_message_id")) }
+        else if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"channels.getMessages\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"id\":[{\"@type\":\"inputMessageID\",\"id\":%}]}", -1000000000000 - chat, E.Number(peer, 0, "access_hash"), message) }
+        else { BuilderPrint(*out, "{\"@type\":\"messages.getMessages\",\"id\":[{\"@type\":\"inputMessageID\",\"id\":%}]}", message) }
+        reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; rows := FieldAt(reply, 0, "messages")
+        if kind == "getMessage" { if ArrayCount(reply, rows) <= 0 { return RPC.Error(404, "Telegram message is absent") }; return Messages.Normalize(E.Raw(reply, ElementAt(reply, rows, 0)), chat) }
+        normalized: Vec(u8); BuilderPrint(*normalized, "{\"@type\":\"messages\",\"messages\":["); comma := ""
+        for i: 0..ArrayCount(reply, rows) - 1 { BuilderPrint(*normalized, "% %", comma, Messages.Normalize(E.Raw(reply, ElementAt(reply, rows, i)), chat)); comma = "," }; BuilderPrint(*normalized, "]}"); return BuilderFinish(normalized)
+    }
+    if kind == "sendMessage" {
+        out: Vec(u8)
+        random: [8]u8; if !Random.FillSecure(random[:]) { return RPC.Error(-1, "Secure randomness unavailable") }
+        text := E.String(request, FieldAt(request, FieldAt(request, 0, "input_message_content"), "text"), "text")
+        BuilderPrint(*out, "{\"@type\":\"messages.sendMessage\",\"peer\":%,\"message\":%,\"random_id\":%}", peer, E.Quote(text), MT.Integer(random[:]))
+        reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; id := E.Number(reply, 0, "id")
+        rows := FieldAt(reply, 0, "updates")
+        for i: 0..ArrayCount(reply, rows) - 1 { update := E.Raw(reply, ElementAt(reply, rows, i)); if E.Kind(update) == "updateNewMessage" || E.Kind(update) == "updateNewChannelMessage" { id = E.Number(update, FieldAt(update, 0, "message"), "id") }; Update(update) }
+        if id <= 0 { return RPC.Error(-1, "Telegram send outcome is unknown") }
+        sent: Vec(u8); BuilderPrint(*sent, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"sending_state\":{\"@type\":\"messageSendingStatePending\"}}", id, chat); pending := BuilderFinish(sent)
+        succeeded: Vec(u8); BuilderPrint(*succeeded, "{\"@type\":\"updateMessageSendSucceeded\",\"old_message_id\":%,\"message\":{\"id\":%,\"chat_id\":%}}", id, id, chat); Push(BuilderFinish(succeeded)); return pending
+    }
+    if kind == "getCallbackQueryAnswer" {
+        out: Vec(u8)
+        BuilderPrint(*out, "{\"@type\":\"messages.getBotCallbackAnswer\",\"peer\":%,\"msg_id\":%,\"data\":%}", peer, message, E.Quote(E.String(request, FieldAt(request, 0, "payload"), "data")))
+        reply := Request(BuilderFinish(out))
+        if E.Kind(reply) == "rpc_error" { return reply }
+        text := E.Quote(E.String(reply, 0, "message"))
+        return Join("{\"@type\":\"callbackQueryAnswer\",\"text\":", Join(text, "}"))
+    }
+    if kind == "addMessageReaction" || kind == "removeMessageReaction" {
+        out: Vec(u8)
+        reaction := "[]"; if kind == "addMessageReaction" { reaction = Join("[{\"@type\":\"reactionEmoji\",\"emoticon\":", Join(E.Quote(E.String(request, FieldAt(request, 0, "reaction_type"), "emoji")), "}]")) }
+        BuilderPrint(*out, "{\"@type\":\"messages.sendReaction\",\"peer\":%,\"msg_id\":%,\"reaction\":%}", peer, message, reaction); reply := Request(BuilderFinish(out)); Update(reply); return reply
+    }
+    if kind == "viewMessages" {
+        out: Vec(u8)
+        ids := FieldAt(request, 0, "message_ids"); max: s64
+        for i: 0..ArrayCount(request, ids) - 1 { id := E.Integer(E.Raw(request, ElementAt(request, ids, i))); if id > max { max = id } }
+        if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"channels.readHistory\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"max_id\":%}", -1000000000000 - chat, E.Number(peer, 0, "access_hash"), max) }
+        else { BuilderPrint(*out, "{\"@type\":\"messages.readHistory\",\"peer\":%,\"max_id\":%}", peer, max) }; return Request(BuilderFinish(out))
+    }; return RPC.Error(400, "Unsupported Telegram request")
+}
+Send :: (client: s32, request: string) {
+    unused client; kind := E.Kind(request); extra := E.String(request, 0, "@extra")
+    if kind == "getAuthorizationState" { if !started { return }; Authorization(); return }
+    if kind == "close" { Push("{\"@type\":\"updateAuthorizationState\",\"authorization_state\":{\"@type\":\"authorizationStateClosed\"}}"); return }
+    if kind == "setTdlibParameters" {
+        directory = E.String(request, 0, "database_directory")
+        if !Auth.Connect(*account, cast(s32)E.Number(request, 0, "api_id"), E.String(request, 0, "api_hash"), E.String(request, 0, "device_model"), Load()) { Error(account.error, extra); return }
+        started = true; if !Save() { Error("Cannot save the private Telegram account session", extra); return }; Authorization(); return
+    }
+    if kind == "setAuthenticationPhoneNumber" || kind == "checkAuthenticationCode" || kind == "checkAuthenticationPassword" {
+        ok: bool
+        if kind == "setAuthenticationPhoneNumber" { ok = Auth.Phone(*account, E.String(request, 0, "phone_number")) }
+        if kind == "checkAuthenticationCode" { ok = Auth.Code(*account, E.String(request, 0, "code")) }
+        if kind == "checkAuthenticationPassword" { ok = Auth.Password(*account, E.String(request, 0, "password")) }
+        if !ok { Error(account.error, extra) } else if !Save() { Error("Cannot save the private Telegram account session", extra) } else { Authorization() }; return
+    }
+    reply := Dispatch(request)
+    if E.Kind(reply) == "rpc_error" { Error(E.String(reply, 0, "error_message"), extra) } else { Reply(reply, extra) }
+    unused Save()
+}
+Receive :: (timeout: float64) -> string {
+    if head == tail && account.state == "ready" {
+        unused RPC.Poll(*account.client, cast(s32)(timeout * 1000.0))
+        while true { update := RPC.NextUpdate(*account.client); if update == "" { break }; Update(update) }
+        if MT.Now() >= next_sync || account.client.gap || overflow {
+            // Dialog refresh also reconciles channel unread counts after a gap.
+            offset_id[0] = 0; offset_id[1] = 0; offset_date[0] = 0; offset_date[1] = 0; offset_peer[0] = ""; offset_peer[1] = ""
+            unused Dialogs(0); unused Dialogs(1); next_sync = MT.Now() + 60; account.client.gap = false; overflow = false
+        }
+    }
+    if head == tail { return "" }; value := E.Copy(queue[head]); queue[head] = ""; head = (head + 1) % 8192; return value
+}
+Execute :: (request: string) -> string { unused request; return "{\"@type\":\"ok\"}" }

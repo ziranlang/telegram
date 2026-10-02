@@ -1,0 +1,56 @@
+// Normalize Telegram API messages without losing callback bytes or peer IDs.
+E :: #import "encoding";
+#import "std/json_scan"
+#import "std/text"
+ChatId :: (peer: string) -> s64 {
+    kind := E.Kind(peer)
+    if kind == "peerUser" { return E.Number(peer, 0, "user_id") }
+    if kind == "peerChat" { return -E.Number(peer, 0, "chat_id") }
+    if kind == "peerChannel" { return -1000000000000 - E.Number(peer, 0, "channel_id") }; return 0
+}
+Peer :: (chat: s64) -> string {
+    out: Vec(u8)
+    if chat > 0 { BuilderPrint(*out, "{\"@type\":\"peerUser\",\"user_id\":%}", chat) }
+    else if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"peerChannel\",\"channel_id\":%}", -1000000000000 - chat) }
+    else { BuilderPrint(*out, "{\"@type\":\"peerChat\",\"chat_id\":%}", -chat) }; return BuilderFinish(out)
+}
+Normalize :: (message: string, chat: s64) -> string {
+    peer := E.Raw(message, FieldAt(message, 0, "from_id")); sender := ChatId(peer); outgoing := E.Raw(message, FieldAt(message, 0, "out")) == "true"
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"date\":%,\"is_outgoing\":%,\"sender_id\":{\"@type\":\"%\",\"%\":%},\"content\":", E.Number(message, 0, "id"), chat, E.Number(message, 0, "date"), ifx outgoing then "true" else "false", ifx sender > 0 then "messageSenderUser" else "messageSenderChat", ifx sender > 0 then "user_id" else "chat_id", sender)
+    kind := E.Kind(message); text := E.String(message, 0, "message")
+    if kind == "messageService" { BuilderPrint(*out, "{\"@type\":\"messageChatChangeTitle\",\"title\":%}", E.Quote(E.String(message, FieldAt(message, 0, "action"), "title"))) }
+    else {
+        media := FieldAt(message, 0, "media"); media_kind := E.String(message, media, "@type")
+        if media_kind == "messageMediaPhoto" { BuilderPrint(*out, "{\"@type\":\"messagePhoto\",\"caption\":{\"text\":%}}", E.Quote(text)) }
+        else if media_kind == "messageMediaDocument" {
+            document := FieldAt(message, media, "document"); attributes := FieldAt(message, document, "attributes"); name := "Attachment"; content := "messageDocument"
+            for i: 0..ArrayCount(message, attributes) - 1 {
+                at := ElementAt(message, attributes, i); attribute := E.String(message, at, "@type")
+                if attribute == "documentAttributeFilename" { name = E.String(message, at, "file_name") }
+                if attribute == "documentAttributeVideo" { content = "messageVideo" }
+                if attribute == "documentAttributeAnimated" { content = "messageAnimation" }
+                if attribute == "documentAttributeAudio" { content = "messageAudio"; if E.Raw(message, FieldAt(message, at, "voice")) == "true" { content = "messageVoiceNote" } }
+                if attribute == "documentAttributeSticker" { content = "messageSticker" }
+            }
+            BuilderPrint(*out, "{\"@type\":%,\"document\":{\"file_name\":%},\"caption\":{\"text\":%}}", E.Quote(content), E.Quote(name), E.Quote(text))
+        }
+        else { BuilderPrint(*out, "{\"@type\":\"messageText\",\"text\":{\"@type\":\"formattedText\",\"text\":%}}", E.Quote(text)) }
+    }
+    markup := FieldAt(message, 0, "reply_markup")
+    if E.String(message, markup, "@type") == "replyInlineMarkup" {
+        BuilderPrint(*out, ",\"reply_markup\":{\"@type\":\"replyMarkupInlineKeyboard\",\"rows\":["); rows := FieldAt(message, markup, "rows"); comma := ""
+        for i: 0..ArrayCount(message, rows) - 1 {
+            row := ElementAt(message, rows, i); buttons := FieldAt(message, row, "buttons"); cell_comma := ""; BuilderPrint(*out, "%[", comma)
+            for j: 0..ArrayCount(message, buttons) - 1 {
+                at := ElementAt(message, buttons, j); if E.String(message, at, "@type") != "keyboardButtonCallback" { continue }
+                BuilderPrint(*out, "%{\"text\":%,\"type\":{\"@type\":\"inlineKeyboardButtonTypeCallback\",\"data\":%}}", cell_comma, E.Quote(E.String(message, at, "text")), E.Quote(E.String(message, at, "data"))); cell_comma = ","
+            }; BuilderPrint(*out, "]"); comma = ","
+        }; BuilderPrint(*out, "]}")
+    }
+    reactions := FieldAt(message, 0, "reactions"); results := FieldAt(message, reactions, "results"); BuilderPrint(*out, ",\"interaction_info\":{\"reactions\":{\"reactions\":["); comma := ""
+    for i: 0..ArrayCount(message, results) - 1 {
+        at := ElementAt(message, results, i); reaction := FieldAt(message, at, "reaction")
+        if E.String(message, reaction, "@type") != "reactionEmoji" { continue }
+        BuilderPrint(*out, "%{\"type\":{\"@type\":\"reactionTypeEmoji\",\"emoji\":%},\"total_count\":%,\"is_chosen\":%}", comma, E.Quote(E.String(message, reaction, "emoticon")), E.Number(message, at, "count"), ifx FieldAt(message, at, "chosen_order") >= 0 then "true" else "false"); comma = ","
+    }; BuilderPrint(*out, "]}}}"); return BuilderFinish(out)
+}

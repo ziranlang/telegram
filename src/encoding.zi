@@ -1,0 +1,51 @@
+#import "std/text"
+#import "std/json_scan"
+#import "std/byte_text_linux"
+Alphabet :: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+HexAlphabet :: "0123456789abcdef";
+Hex :: (bytes: []u8) -> string { out: Vec(u8); for i: 0..cast(s32)bytes.count-1 { value := bytes[i]; BuilderPrint(*out,"%",HexAlphabet[cast(s32)value/16:cast(s32)value/16+1]); BuilderPrint(*out,"%",HexAlphabet[cast(s32)value%16:cast(s32)value%16+1]) }; return BuilderFinish(out) }
+Nibble :: (b: u8) -> s32 { if b>=cast(u8)48 && b<=cast(u8)57 { return cast(s32)b-48 }; if b>=cast(u8)97 && b<=cast(u8)102 { return cast(s32)b-87 }; if b>=cast(u8)65 && b<=cast(u8)70 { return cast(s32)b-55 }; return -1 }
+Unhex :: (text: string, bytes: []u8) -> bool { if text.count != bytes.count*2 { return false }; for i: 0..cast(s32)bytes.count-1 { a := Nibble(text[i*2]); b := Nibble(text[i*2+1]); if a<0 || b<0 { return false }; bytes[i] = cast(u8)(a*16+b) }; return true }
+Base64 :: (bytes: []u8, url: bool = false) -> string {
+    out: Vec(u8); at: s32 = 0
+    while at<bytes.count {
+        value := cast(u32)bytes[at]<<cast(u32)16; left := bytes.count-at
+        if left>1 { value |= cast(u32)bytes[at+1]<<cast(u32)8 }; if left>2 { value |= cast(u32)bytes[at+2] }
+        for i: 0..3 {
+            if i>left { if !url { BuilderPrint(*out,"=") } }
+            else { n := cast(s32)((value>>cast(u32)(18-6*i))&cast(u32)63); if url && n==62 { BuilderPrint(*out,"-") } else if url && n==63 { BuilderPrint(*out,"_") } else { BuilderPrint(*out,"%",Alphabet[n:n+1]) } }
+        }; at+=3
+    }; return BuilderFinish(out)
+}
+Digit :: (b: u8) -> s32 { if b>=cast(u8)65 && b<=cast(u8)90 { return cast(s32)b-65 }; if b>=cast(u8)97 && b<=cast(u8)122 { return cast(s32)b-71 }; if b>=cast(u8)48 && b<=cast(u8)57 { return cast(s32)b+4 }; if b==cast(u8)43 || b==cast(u8)45 { return 62 }; if b==cast(u8)47 || b==cast(u8)95 { return 63 }; return -1 }
+Unbase64 :: (text: string, bytes: []u8) -> s32 {
+    value: u32; bits: s32; count: s32; padding: bool
+    for i: 0..cast(s32)text.count-1 {
+        if text[i]==cast(u8)61 { padding=true; continue }; n:=Digit(text[i]); if n<0 || padding { return -1 }
+        value=(value<<cast(u32)6)|cast(u32)n; bits+=6
+        if bits>=8 { bits-=8; if count>=bytes.count { return -1 }; bytes[count]=cast(u8)(value>>cast(u32)bits); count+=1 }
+    }
+    if bits>=6 || (bits>0 && (value&((cast(u32)1<<cast(u32)bits)-cast(u32)1))!=cast(u32)0) { return -1 }; return count
+}
+Quote :: (text: string) -> string {
+    out: Vec(u8); BuilderPrint(*out,"\"")
+    for i: 0..cast(s32)text.count-1 {
+        b:=text[i]
+        if b==cast(u8)34 { BuilderPrint(*out,"\\\"") } else if b==cast(u8)92 { BuilderPrint(*out,"\\\\") }
+        else if b<cast(u8)32 { BuilderPrint(*out,"\\u00%",HexAlphabet[cast(s32)b/16:cast(s32)b/16+1]); BuilderPrint(*out,"%",HexAlphabet[cast(s32)b%16:cast(s32)b%16+1]) }
+        else { BuilderPrint(*out,"%",text[i:i+1]) }
+    }; BuilderPrint(*out,"\""); return BuilderFinish(out)
+}
+String :: (json: string, at: s32, name: string) -> string { bytes: [1048576]u8; count:=ReadStringText(json,FieldAt(json,at,name),bytes[:]); if count<0 { return "" }; return Copy(TextFromBytes(bytes[:count])) }
+Integer :: (text: string) -> s64 {
+    value: u64; at: s32; negative: bool
+    if text.count>0 && text[0]==cast(u8)45 { negative=true; at=1 }
+    for i: at..cast(s32)text.count-1 { b:=text[i]; if b<cast(u8)48 || b>cast(u8)57 { return 0 }; digit:=cast(u64)b-cast(u64)48; if value>(cast(u64)0x7fffffffffffffff+cast(u64)(ifx negative then 1 else 0)-digit)/cast(u64)10 { return 0 }; value=value*cast(u64)10+digit }
+    if negative { return cast(s64)(cast(u64)0-value) }; return cast(s64)value
+}
+Raw :: (json: string, at: s32) -> string { if at<0 { return "" }; end:=ValueEnd(json,at,0); if end<0 { return "" }; return json[at:end] }
+Number :: (json: string, at: s32, name: string) -> s64 { return Integer(Raw(json,FieldAt(json,at,name))) }
+Kind :: (json: string) -> string { return String(json,0,"@type") }
+Copy :: (text: string) -> string { out: Vec(u8); BuilderPrint(*out,"%",text); return BuilderFinish(out) }
+
+Trim :: (text: string) -> string { start: s32;end:=cast(s32)text.count;while start<end && text[start]<=cast(u8)32 { start+=1 };while end>start && text[end-1]<=cast(u8)32 { end-=1 };return text[start:end] }

@@ -1,0 +1,24 @@
+Auth :: #import "auth";
+E :: #import "encoding";
+Messages :: #import "messages";
+TL :: #import "tl";
+Main :: () -> s32 {
+    failures: s32; entropy: [256]u8
+    for i: 0..255 { entropy[i] = cast(u8)i }
+    parameters := "{\"current_algo\":{\"@type\":\"passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow\",\"salt1\":\"c2FsdCBvbmU=\",\"salt2\":\"c2FsdCB0d28=\",\"p\":\"xxyuucaxyQSObFIvcPE/c5gNQCOOPiHBSTTQN1Y9kw9IGYoKp8FAWCKUk9IlMPTb+jNvbgrJJROVQ67UTM58NyD9UfaUWHBaxozU/mtrE6vcl0ZRKWkyhFTxj6+MWV9kJHf+lrsqlB1bzR1KyMxJiAcI+ps3jjxPOpBgvuZ8+aSkppWBEFGQfhYnU7VrD2tBDbp02KhLKhSzFE4O8ShHVP0X7ZUNWWW0ud1GWC2xF40WnGvEZbDW/5yjko/vW5rk5Bj8Feg+vqD4f6n/Xu1wBQ3tKEn0e/lZ2VaFDOkphR8NgRX2NbEF7i5OFdBLJFS/b0+t8DSxBAMRnNjjuS/MWw==\",\"g\":3},\"srp_B\":\"m7RaMZzCZ/I1rYk4OgTvYC2yb46gTInP9ptkBCa0UqI9uhxnP1joB/SFriTj54GDc1YuY0zwnaA3OnQvqqqXXF3n1VHYFemdZs5p44ESWdkDkNoJIy+0EafABB3MWt0l6vBH4KLgnCuAwRxkut2Xo/Xwdimq5A4FmpWeD/O8rAlRLF7WghNyTINuh3pTS9ycn/MWbf1Am0s/tJ+nHtnlbqndJpavFS4iJjJudvTUSk0KY3glvuV73nCE2RDxF6sSUK0rDllkbYDCrRYZy8oc1G2dhgFaD4WqhtXppBSm5jYgpd4sIl0KUlSm/Y4b2TMBdUKeflmT9gi/Ui1KGfaY5w==\",\"srp_id\":9007199254740993}"
+    proof := Auth.PasswordProof(parameters, "public test password", entropy[:])
+    if E.String(proof,0,"A") != "SwFv1dVhiLhGsgN1OfZm6RIoXYziGhS176A8VAxlVX85DAgrje295kj8NEHnSTFfnXSRiPTaGJyrd+/tus3NDttVogwNC4EANp6RC4UGpJo8NaIa8wFUnUVC8s3y1K6Pa8M9BQnety+n49wjUTr4n1Kjj+FpxTeMXeV2Dw7zBkeSaR7ACgcfw7u5BFbUY8raUfj5qh0XRtmWzS2SGxqY21tcO+pSTMrT9DnxEgUQEVyL8rLpgU4qQBQfWq480sKwajZAzS58NoCWWW3R+AZ7w+OXs90bqx+wKsVpab5OFYKclCfJJjQYaFIva4amBOZOi/Bb6sOPC/HCJIttvksfkA==" || E.String(proof,0,"M1") != "45OuXxTffmKJArIsbS80v590hvbH7ybAg34hlPoFzo4=" || E.Number(proof,0,"srp_id") != 9007199254740993 { print("FAIL independent SRP vector\n"); failures+=1 }
+    if Auth.PasswordProof("{}", "secret", entropy[:]) != "" { print("FAIL reject unknown password algorithm\n"); failures+=1 }
+    account: Auth.Account; account.client.connection.dc=2; account.client.connection.ready=true; account.client.connection.salt=-9007199254740993
+    for i: 0..255 { account.client.connection.key[i]=cast(u8)i }
+    snapshot := Auth.Snapshot(*account); restored: Auth.Account
+    if !Auth.Restore(*restored,snapshot) || restored.client.connection.salt != -9007199254740993 || restored.client.connection.key[255] != cast(u8)255 { print("FAIL session round trip\n"); failures+=1 }
+    if Auth.Restore(*restored,"{\"format\":1,\"dc\":2,\"test\":false,\"key\":\"bad\"}") { print("FAIL corrupt key rejected\n"); failures+=1 }
+    bytes: [4096]u8
+    init := "{\"@type\":\"invokeWithLayer\",\"layer\":227,\"query\":{\"@type\":\"initConnection\",\"api_id\":123,\"device_model\":\"Ziran\",\"system_version\":\"Linux\",\"app_version\":\"1.0\",\"system_lang_code\":\"en\",\"lang_pack\":\"\",\"lang_code\":\"en\",\"query\":{\"@type\":\"help.getConfig\"}}}"
+    if TL.Encode(init,bytes[:])<=0 { print("FAIL generic initialization encoding\n"); failures+=1 }
+    message := "{\"@type\":\"message\",\"id\":12,\"peer_id\":{\"@type\":\"peerChannel\",\"channel_id\":99},\"from_id\":{\"@type\":\"peerUser\",\"user_id\":55},\"date\":100,\"message\":\"Approve?\",\"reply_markup\":{\"@type\":\"replyInlineMarkup\",\"rows\":[{\"buttons\":[{\"@type\":\"keyboardButtonCallback\",\"text\":\"Approve\",\"data\":\"AP8=\"}]}]}}"
+    normalized := Messages.Normalize(message,-1000000000099)
+    if E.Number(normalized,0,"id")!=12 || E.Number(normalized,0,"chat_id")!=-1000000000099 { print("FAIL source identity\n"); failures+=1 }
+    print("Telegram auth and normalization: % failures\n",failures); return failures
+}

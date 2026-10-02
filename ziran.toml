@@ -1,0 +1,24 @@
+[package]
+name = "telegram"
+module_roots = ["src", "tests"]
+
+[toolchain]
+git = "https://github.com/ziranlang/ziran.git"
+ref = "master"
+
+[exports]
+tl = "src/tl.zi"
+encoding = "src/encoding.zi"
+mtproto = "src/mtproto.zi"
+client = "src/client.zi"
+auth = "src/auth.zi"
+messages = "src/messages.zi"
+session = "src/session.zi"
+
+[dependencies.crypto]
+git = "https://github.com/ziranlang/crypto.git"
+ref = "master"
+
+[dependencies.compression]
+git = "https://github.com/ziranlang/compression.git"
+ref = "master"
