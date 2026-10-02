@@ -12,13 +12,13 @@ Random :: #import "std/random_linux";
 #import "std/c_string"
 #import "std/byte_text_linux"
 c :: #system_library "libc";
-OpenRaw :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
-ReadRaw :: (fd: s32, bytes: *u8, size: usize) -> s64 #foreign c "read";
-WriteRaw :: (fd: s32, bytes: *u8, size: usize) -> s64 #foreign c "write";
-CloseRaw :: (fd: s32) -> s32 #foreign c "close";
-SyncRaw :: (fd: s32) -> s32 #foreign c "fsync";
-StatRaw :: (fd: s32, path: *u8, flags: s32, mask: u32, output: *u8) -> s32 #foreign c "statx";
-OwnerRaw :: () -> u32 #foreign c "getuid";
+SessionOpenRaw :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
+SessionReadRaw :: (fd: s32, bytes: *u8, size: usize) -> s64 #foreign c "read";
+SessionWriteRaw :: (fd: s32, bytes: *u8, size: usize) -> s64 #foreign c "write";
+SessionCloseRaw :: (fd: s32) -> s32 #foreign c "close";
+SessionSyncRaw :: (fd: s32) -> s32 #foreign c "fsync";
+SessionStatRaw :: (fd: s32, path: *u8, flags: s32, mask: u32, output: *u8) -> s32 #foreign c "statx";
+SessionOwnerRaw :: () -> u32 #foreign c "getuid";
 Join :: (a: string, b: string) -> string { out: Vec(u8); BuilderPrint(*out, "%", a); BuilderPrint(*out, "%", b); return BuilderFinish(out) }
 account: Auth.Account;
 directory: string;
@@ -39,24 +39,24 @@ Authorization :: () {
 Create :: () -> s32 { Push("{\"@type\":\"updateAuthorizationState\",\"authorization_state\":{\"@type\":\"authorizationStateWaitTdlibParameters\"}}"); return 1 }
 Private :: (fd: s32) -> bool {
     metadata: [256]u8; empty: [1]u8
-    if StatRaw(fd, *empty[0], 4096, 11, *metadata[0]) != 0 { return false }
+    if SessionStatRaw(fd, *empty[0], 4096, 11, *metadata[0]) != 0 { return false }
     mode := cast(u32)metadata[28] | (cast(u32)metadata[29] << cast(u32)8)
     owner := cast(u32)metadata[20] | (cast(u32)metadata[21] << cast(u32)8) | (cast(u32)metadata[22] << cast(u32)16) | (cast(u32)metadata[23] << cast(u32)24)
-    return owner == OwnerRaw() && (mode & cast(u32)61440) == cast(u32)32768 && (mode & cast(u32)63) == cast(u32)0
+    return owner == SessionOwnerRaw() && (mode & cast(u32)61440) == cast(u32)32768 && (mode & cast(u32)63) == cast(u32)0
 }
 Load :: () -> string {
     path: [4096]u8; if !CopyCString(Join(directory, "/account.json"), path[:]) { return "" }
-    fd := OpenRaw(*path[0], 655360, 0); if fd < 0 { return "" }; defer { unused CloseRaw(fd) }
-    if !Private(fd) { return "invalid" }; bytes: [8192]u8; count := ReadRaw(fd, *bytes[0], 8192)
+    fd := SessionOpenRaw(*path[0], 655360, 0); if fd < 0 { return "" }; defer { unused SessionCloseRaw(fd) }
+    if !Private(fd) { return "invalid" }; bytes: [8192]u8; count := SessionReadRaw(fd, *bytes[0], 8192)
     if count <= 0 || count >= 8192 { return "invalid" }; return E.Copy(TextFromBytes(bytes[:count]))
 }
 Save :: () -> bool {
     snapshot := Auth.Snapshot(*account); path: [4096]u8; final: [4096]u8; random: [16]u8
     if !Random.FillSecure(random[:]) || !CopyCString(Join(directory, Join("/.account-", E.Hex(random[:]))), path[:]) || !CopyCString(Join(directory, "/account.json"), final[:]) { return false }
-    fd := OpenRaw(*path[0], 655553, 384); if fd < 0 { return false }
+    fd := SessionOpenRaw(*path[0], 655553, 384); if fd < 0 { return false }
     descriptor := cast(*TextDescriptor)(*snapshot); at: s64; ok := true
-    while at < snapshot.count { count := WriteRaw(fd, *descriptor.data[at], cast(usize)(snapshot.count - at)); if count <= 0 { ok = false; break }; at += count }
-    ok = SyncRaw(fd) == 0 && ok; unused CloseRaw(fd)
+    while at < snapshot.count { count := SessionWriteRaw(fd, *descriptor.data[at], cast(usize)(snapshot.count - at)); if count <= 0 { ok = false; break }; at += count }
+    ok = SessionSyncRaw(fd) == 0 && ok; unused SessionCloseRaw(fd)
     if ok { ok = File.RenamePath(TextFromCString(*path[0]), TextFromCString(*final[0])) }
     if !ok { unused File.RemoveFile(TextFromCString(*path[0])) }; return ok
 }
