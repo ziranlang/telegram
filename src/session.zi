@@ -5,7 +5,6 @@ RPC :: #import "client";
 MT :: #import "mtproto";
 E :: #import "encoding";
 Messages :: #import "messages";
-File :: #import "std/file";
 Random :: #import "std/random_linux";
 #import "std/text"
 #import "std/json_scan"
@@ -13,21 +12,31 @@ Random :: #import "std/random_linux";
 #import "std/byte_text_linux"
 c :: #system_library "libc";
 SessionOpenRaw :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
+SessionOpenAtRaw :: (fd: s32,path: *u8,flags: s32,mode: s32) -> s32 #foreign c "openat";
+SessionRenameRaw :: (from_fd: s32,from: *u8,to_fd: s32,to: *u8) -> s32 #foreign c "renameat";
+SessionUnlinkRaw :: (fd: s32,path: *u8,flags: s32) -> s32 #foreign c "unlinkat";
 SessionReadRaw :: (fd: s32, bytes: *u8, size: usize) -> s64 #foreign c "read";
 SessionWriteRaw :: (fd: s32, bytes: *u8, size: usize) -> s64 #foreign c "write";
 SessionCloseRaw :: (fd: s32) -> s32 #foreign c "close";
 SessionSyncRaw :: (fd: s32) -> s32 #foreign c "fsync";
 SessionStatRaw :: (fd: s32, path: *u8, flags: s32, mask: u32, output: *u8) -> s32 #foreign c "statx";
 SessionOwnerRaw :: () -> u32 #foreign c "getuid";
+SessionErrnoRaw :: () -> *s32 #foreign c "__errno_location";
 Join :: (a: string, b: string) -> string { out: Vec(u8); BuilderPrint(*out, "%", a); BuilderPrint(*out, "%", b); return BuilderFinish(out) }
 account: Auth.Account;
 directory: string;
+directory_fd: s32 = -1;
+last_snapshot: string;
 queue: [8192]string;
 head: s32; tail: s32; overflow: bool;
 peer_ids: [4096]s64; peer_hashes: [4096]s64; peer_count: s32;
+channel_pts: [4096]s64; channel_saved: [4096]s64; channel_gap: [4096]bool;
 offset_id: [2]s64; offset_date: [2]s64; offset_peer: [2]string;
-pts: s64; qts: s64; date: s64; next_sync: s64;
+pts: s64; qts: s64; date: s64; seq: s64; next_sync: s64; next_difference: s64;
+saved_pts: s64; saved_qts: s64; saved_date: s64; saved_seq: s64;
+recovering: bool;
 started: bool;
+send_success: string;
 Push :: (value: string) { next := (tail + 1) % 8192; if next == head { overflow = true; return }; queue[tail] = E.Copy(value); tail = next }
 Authorization :: () {
     state := "authorizationStateWaitPhoneNumber"
@@ -37,28 +46,48 @@ Authorization :: () {
     out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateAuthorizationState\",\"authorization_state\":{\"@type\":%}}", E.Quote(state)); Push(BuilderFinish(out))
 }
 Create :: () -> s32 { Push("{\"@type\":\"updateAuthorizationState\",\"authorization_state\":{\"@type\":\"authorizationStateWaitTdlibParameters\"}}"); return 1 }
-Private :: (fd: s32) -> bool {
+Private :: (fd: s32,kind: u32 = cast(u32)32768) -> bool {
     metadata: [256]u8; empty: [1]u8
     if SessionStatRaw(fd, *empty[0], 4096, 11, *metadata[0]) != 0 { return false }
     mode := cast(u32)metadata[28] | (cast(u32)metadata[29] << cast(u32)8)
     owner := cast(u32)metadata[20] | (cast(u32)metadata[21] << cast(u32)8) | (cast(u32)metadata[22] << cast(u32)16) | (cast(u32)metadata[23] << cast(u32)24)
-    return owner == SessionOwnerRaw() && (mode & cast(u32)61440) == cast(u32)32768 && (mode & cast(u32)63) == cast(u32)0
+    return owner == SessionOwnerRaw() && (mode & cast(u32)61440) == kind && (mode & cast(u32)63) == cast(u32)0
 }
 Load :: () -> string {
-    path: [4096]u8; if !CopyCString(Join(directory, "/account.json"), path[:]) { return "" }
-    fd := SessionOpenRaw(*path[0], 655360, 0); if fd < 0 { return "" }; defer { unused SessionCloseRaw(fd) }
-    if !Private(fd) { return "invalid" }; bytes: [8192]u8; count := SessionReadRaw(fd, *bytes[0], 8192)
-    if count <= 0 || count >= 8192 { return "invalid" }; return E.Copy(TextFromBytes(bytes[:count]))
+    path: [32]u8; if !CopyCString("account.json", path[:]) { return "invalid" }
+    fd := SessionOpenAtRaw(directory_fd,*path[0],657408,0); if fd < 0 { return ifx SessionErrnoRaw().* == 2 then "" else "invalid" }; defer { unused SessionCloseRaw(fd) }
+    if !Private(fd) { return "invalid" }; bytes: [524288]u8; count := SessionReadRaw(fd, *bytes[0], 524288)
+    if count <= 0 || count >= 524288 { return "invalid" }; return E.Copy(TextFromBytes(bytes[:count]))
+}
+RestoreUpdates :: (snapshot: string) {
+    state := FieldAt(snapshot,0,"updates"); pts=E.Number(snapshot,state,"pts"); qts=E.Number(snapshot,state,"qts"); date=E.Number(snapshot,state,"date"); seq=E.Number(snapshot,state,"seq")
+    rows := FieldAt(snapshot,0,"peers")
+    for i: 0..ArrayCount(snapshot,rows)-1 {
+        if peer_count >= 4096 { break }; at:=ElementAt(snapshot,rows,i)
+        peer_ids[peer_count]=E.Number(snapshot,at,"id"); peer_hashes[peer_count]=E.Number(snapshot,at,"hash"); channel_pts[peer_count]=E.Number(snapshot,at,"pts"); peer_count+=1
+    }
+    Checkpoint()
+}
+Checkpoint :: () {
+    saved_pts=pts; saved_qts=qts; saved_date=date; saved_seq=seq
+    for i: 0..peer_count-1 { channel_saved[i]=channel_pts[i] }
+}
+Snapshot :: () -> string {
+    auth:=Auth.Snapshot(*account); out: Vec(u8)
+    BuilderPrint(*out,"%,\"updates\":{\"pts\":%,\"qts\":%,\"date\":%,\"seq\":%},\"peers\":[",auth[:auth.count-1],saved_pts,saved_qts,saved_date,saved_seq); comma:=""
+    for i: 0..peer_count-1 { BuilderPrint(*out,"%{\"id\":%,\"hash\":%,\"pts\":%}",comma,peer_ids[i],peer_hashes[i],channel_saved[i]);comma="," }
+    BuilderPrint(*out,"]}"); return BuilderFinish(out)
 }
 Save :: () -> bool {
-    snapshot := Auth.Snapshot(*account); path: [4096]u8; final: [4096]u8; random: [16]u8
-    if !Random.FillSecure(random[:]) || !CopyCString(Join(directory, Join("/.account-", E.Hex(random[:]))), path[:]) || !CopyCString(Join(directory, "/account.json"), final[:]) { return false }
-    fd := SessionOpenRaw(*path[0], 655553, 384); if fd < 0 { return false }
+    snapshot := Snapshot(); path: [4096]u8; final: [4096]u8; random: [16]u8
+    if snapshot == last_snapshot { return true }
+    if directory_fd<0 || !Random.FillSecure(random[:]) || !CopyCString(Join(".account-", E.Hex(random[:])), path[:]) || !CopyCString("account.json", final[:]) { return false }
+    fd := SessionOpenAtRaw(directory_fd,*path[0],655553,384); if fd < 0 { return false }
     descriptor := cast(*TextDescriptor)(*snapshot); at: s64; ok := true
     while at < snapshot.count { count := SessionWriteRaw(fd, *descriptor.data[at], cast(usize)(snapshot.count - at)); if count <= 0 { ok = false; break }; at += count }
     ok = SessionSyncRaw(fd) == 0 && ok; unused SessionCloseRaw(fd)
-    if ok { ok = File.RenamePath(TextFromCString(*path[0]), TextFromCString(*final[0])) }
-    if !ok { unused File.RemoveFile(TextFromCString(*path[0])) }; return ok
+    if ok { ok = SessionRenameRaw(directory_fd,*path[0],directory_fd,*final[0])==0 && SessionSyncRaw(directory_fd)==0 }
+    if !ok { unused SessionUnlinkRaw(directory_fd,*path[0],0) } else { last_snapshot=E.Copy(snapshot) };return ok
 }
 Reply :: (value: string, extra: string) {
     if extra == "" { Push(value); return }; out: Vec(u8); BuilderPrint(*out, "%,\"@extra\":%}", value[:value.count - 1], E.Quote(extra)); Push(BuilderFinish(out))
@@ -87,27 +116,107 @@ InputPeer :: (id: s64) -> string {
     else { BuilderPrint(*out, "{\"@type\":\"inputPeerChat\",\"chat_id\":%}", -id) }; return BuilderFinish(out)
 }
 Request :: (query: string) -> string {
-    reply := Auth.Request(*account, query); Cache(reply); return reply
+    reply := Auth.Request(*account, query); Cache(reply)
+    error:=E.String(reply,0,"error_message")
+    if error=="AUTH_KEY_UNREGISTERED" || error=="SESSION_REVOKED" || error=="SESSION_EXPIRED" { account.state="phone"; account.user=""; Authorization() }
+    return reply
+}
+PeerSlot :: (id: s64) -> s32 { for i: 0..peer_count-1 { if peer_ids[i]==id { return i } };return -1 }
+Message :: (message: string,chat: s64) {
+    if E.Kind(message)=="messageEmpty" { return }
+    Push(Join("{\"@type\":\"updateNewMessage\",\"message\":",Join(Messages.Normalize(message,chat,E.Number(account.user,0,"id")),"}")))
+    action:=FieldAt(message,0,"action")
+    if E.String(message,action,"@type")=="messageActionChatEditTitle" {
+        out: Vec(u8);BuilderPrint(*out,"{\"@type\":\"updateChatTitle\",\"chat_id\":%,\"title\":%}",chat,E.Quote(E.String(message,action,"title")));Push(BuilderFinish(out))
+    }
+}
+Advance :: (update: string,chat: s64) -> bool {
+    incoming:=E.Number(update,0,"pts"); count:=E.Number(update,0,"pts_count")
+    if incoming<=0 || recovering { return true }
+    previous:=pts;slot:=PeerSlot(chat)
+    if chat<=-1000000000000 { if slot<0 { account.client.gap=true;return true };previous=channel_pts[slot] }
+    if previous>0 && incoming<=previous { return false }
+    if previous==0 || incoming>previous+count {
+        if slot>=0 && chat<=-1000000000000 { channel_gap[slot]=true } else { account.client.gap=true }
+    } else { if slot>=0 && chat<=-1000000000000 { channel_pts[slot]=incoming } else { pts=incoming } }
+    return true
 }
 Update :: (update: string) {
     kind := E.Kind(update)
     if kind == "updates" || kind == "updatesCombined" {
-        Cache(update); rows := FieldAt(update, 0, "updates"); for i: 0..ArrayCount(update, rows) - 1 { Update(E.Raw(update, ElementAt(update, rows, i))) }; date = E.Number(update, 0, "date"); return
+        Cache(update); incoming:=E.Number(update,0,"seq"); first:=incoming;if kind=="updatesCombined" { first=E.Number(update,0,"seq_start") }
+        if incoming>0 && seq>0 && incoming<=seq && !recovering { return }
+        if first>seq+1 && seq>0 { account.client.gap=true }
+        rows := FieldAt(update, 0, "updates"); for i: 0..ArrayCount(update, rows) - 1 { Update(E.Raw(update, ElementAt(update, rows, i))) }
+        if !account.client.gap { if incoming>seq { seq=incoming }; date = E.Number(update, 0, "date") }; return
     }
     if kind == "updateShort" { Update(E.Raw(update, FieldAt(update, 0, "update"))); date = E.Number(update, 0, "date"); return }
     if kind == "updateNewMessage" || kind == "updateNewChannelMessage" || kind == "updateEditMessage" || kind == "updateEditChannelMessage" {
         message := E.Raw(update, FieldAt(update, 0, "message")); chat := Messages.ChatId(E.Raw(message, FieldAt(message, 0, "peer_id")))
-        if kind == "updateNewMessage" || kind == "updateNewChannelMessage" { Push(Join("{\"@type\":\"updateNewMessage\",\"message\":", Join(Messages.Normalize(message, chat), "}"))) }
+        if !Advance(update,chat) { return }
+        if kind == "updateNewMessage" || kind == "updateNewChannelMessage" { Message(message,chat) }
         else { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateMessageEdited\",\"chat_id\":%,\"message_id\":%}", chat, E.Number(message, 0, "id")); Push(BuilderFinish(out)) }
+    }
+    if kind=="updateShortMessage" || kind=="updateShortChatMessage" {
+        if !Advance(update,0) { return };chat:=E.Number(update,0,"user_id");sender:=chat
+        if kind=="updateShortChatMessage" { chat=-E.Number(update,0,"chat_id");sender=E.Number(update,0,"from_id") }
+        outgoing:=E.Raw(update,FieldAt(update,0,"out"))=="true";if outgoing { sender=E.Number(account.user,0,"id") }
+        out: Vec(u8);BuilderPrint(*out,"{\"@type\":\"message\",\"id\":%,\"peer_id\":%,\"from_id\":{\"@type\":\"peerUser\",\"user_id\":%},\"out\":%,\"date\":%,\"message\":%}",E.Number(update,0,"id"),Messages.Peer(chat),sender,ifx outgoing then "true" else "false",E.Number(update,0,"date"),E.Quote(E.String(update,0,"message")));Message(BuilderFinish(out),chat)
     }
     if kind == "updateReadHistoryInbox" || kind == "updateReadChannelInbox" {
         chat := Messages.ChatId(E.Raw(update, FieldAt(update, 0, "peer"))); if kind == "updateReadChannelInbox" { chat = -1000000000000 - E.Number(update, 0, "channel_id") }
         out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateChatReadInbox\",\"chat_id\":%,\"last_read_inbox_message_id\":%,\"unread_count\":%}", chat, E.Number(update, 0, "max_id"), E.Number(update, 0, "still_unread_count")); Push(BuilderFinish(out))
     }
-    if kind == "updateDeleteChannelMessages" { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateDeleteMessages\",\"chat_id\":%,\"message_ids\":%,\"is_permanent\":true,\"from_cache\":false}", -1000000000000 - E.Number(update, 0, "channel_id"), E.Raw(update, FieldAt(update, 0, "messages"))); Push(BuilderFinish(out)) }
+    if kind == "updateDeleteChannelMessages" || kind=="updateDeleteMessages" {
+        chat: s64;if kind=="updateDeleteChannelMessages" { chat=-1000000000000-E.Number(update,0,"channel_id") };if !Advance(update,chat) { return }
+        out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateDeleteMessages\",\"chat_id\":%,\"message_ids\":%,\"is_permanent\":true,\"from_cache\":false}", chat, E.Raw(update, FieldAt(update, 0, "messages"))); Push(BuilderFinish(out))
+    }
     if kind == "updateMessageReactions" { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"updateMessageInteractionInfo\",\"chat_id\":%,\"message_id\":%}", Messages.ChatId(E.Raw(update, FieldAt(update, 0, "peer"))), E.Number(update, 0, "msg_id")); Push(BuilderFinish(out)) }
-    if kind == "updateShortMessage" || kind == "updateShortChatMessage" || kind == "updatesTooLong" || kind == "updateDeleteMessages" { next_sync = 0 }
-    if kind != "updateNewChannelMessage" && kind != "updateEditChannelMessage" && kind != "updateDeleteChannelMessages" && E.Number(update, 0, "pts") > pts { pts = E.Number(update, 0, "pts") }
+    if kind=="updatesTooLong" { account.client.gap=true }
+    if kind=="updateChannelTooLong" { slot:=PeerSlot(-1000000000000-E.Number(update,0,"channel_id"));if slot>=0 { channel_gap[slot]=true } }
+}
+State :: (value: string) {
+    pts=E.Number(value,0,"pts");qts=E.Number(value,0,"qts");date=E.Number(value,0,"date");seq=E.Number(value,0,"seq")
+}
+Difference :: () -> bool {
+    if date<=0 {
+        state:=Request("{\"@type\":\"updates.getState\"}")
+        if E.Kind(state)!="updates.state" { return false };State(state);return true
+    }
+    recovering=true;defer { recovering=false }
+    for page: 0..31 {
+        out: Vec(u8);BuilderPrint(*out,"{\"@type\":\"updates.getDifference\",\"pts\":%,\"date\":%,\"qts\":%}",pts,date,qts)
+        reply:=Request(BuilderFinish(out));kind:=E.Kind(reply)
+        if kind=="rpc_error" { return false }
+        if kind=="updates.differenceEmpty" { date=E.Number(reply,0,"date");seq=E.Number(reply,0,"seq");return true }
+        if kind=="updates.differenceTooLong" { pts=E.Number(reply,0,"pts");next_sync=0;Push("{\"@type\":\"updateHistoryGap\"}");return true }
+        if kind!="updates.difference" && kind!="updates.differenceSlice" { return false }
+        rows:=FieldAt(reply,0,"new_messages")
+        for i: 0..ArrayCount(reply,rows)-1 { message:=E.Raw(reply,ElementAt(reply,rows,i));Message(message,Messages.ChatId(E.Raw(message,FieldAt(message,0,"peer_id")))) }
+        rows=FieldAt(reply,0,"other_updates");for i: 0..ArrayCount(reply,rows)-1 { Update(E.Raw(reply,ElementAt(reply,rows,i))) }
+        State(E.Raw(reply,FieldAt(reply,0,ifx kind=="updates.differenceSlice" then "intermediate_state" else "state")))
+        if kind=="updates.difference" { return true }
+    };return false
+}
+ChannelDifference :: (slot: s32) -> bool {
+    if channel_pts[slot]<=0 { return true }
+    recovering=true;defer { recovering=false }
+    for page: 0..31 {
+        peer:=InputPeer(peer_ids[slot]);out: Vec(u8)
+        BuilderPrint(*out,"{\"@type\":\"updates.getChannelDifference\",\"force\":true,\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"filter\":{\"@type\":\"channelMessagesFilterEmpty\"},\"pts\":%,\"limit\":100}",-1000000000000-peer_ids[slot],E.Number(peer,0,"access_hash"),channel_pts[slot])
+        reply:=Request(BuilderFinish(out));kind:=E.Kind(reply)
+        if kind=="rpc_error" { return false }
+        if kind!="updates.channelDifferenceEmpty" && kind!="updates.channelDifference" && kind!="updates.channelDifferenceTooLong" { return false }
+        rows:=FieldAt(reply,0,ifx kind=="updates.channelDifferenceTooLong" then "messages" else "new_messages")
+        for i: 0..ArrayCount(reply,rows)-1 { Message(E.Raw(reply,ElementAt(reply,rows,i)),peer_ids[slot]) }
+        rows=FieldAt(reply,0,"other_updates");for i: 0..ArrayCount(reply,rows)-1 { Update(E.Raw(reply,ElementAt(reply,rows,i))) }
+        channel_pts[slot]=E.Number(reply,0,"pts")
+        if kind=="updates.channelDifferenceTooLong" {
+            channel_pts[slot]=E.Number(reply,FieldAt(reply,0,"dialog"),"pts")
+            gap: Vec(u8);BuilderPrint(*gap,"{\"@type\":\"updateHistoryGap\",\"chat_id\":%}",peer_ids[slot]);Push(BuilderFinish(gap))
+        }
+        if E.Raw(reply,FieldAt(reply,0,"final"))=="true" { return true }
+    };return false
 }
 Dialogs :: (folder: s32) -> string {
     peer := E.Copy(offset_peer[folder]); if peer == "" { peer = "{\"@type\":\"inputPeerEmpty\"}" }; out: Vec(u8)
@@ -116,6 +225,8 @@ Dialogs :: (folder: s32) -> string {
     if count <= 0 { return RPC.Error(404, "All Telegram chats loaded") }
     for i: 0..count - 1 {
         at := ElementAt(reply, rows, i); id := Messages.ChatId(E.Raw(reply, FieldAt(reply, at, "peer"))); title := "Telegram chat"; type := "chatTypePrivate"
+        slot:=PeerSlot(id);remote_pts:=E.Number(reply,at,"pts")
+        if slot>=0 && id<=-1000000000000 && remote_pts>0 { if channel_pts[slot]==0 { channel_pts[slot]=remote_pts } else if remote_pts>channel_pts[slot] { channel_gap[slot]=true } }
         if id < 0 { type = "chatTypeBasicGroup" }; if id <= -1000000000000 { type = "chatTypeSupergroup" }
         list := FieldAt(reply, 0, ifx id > 0 then "users" else "chats"); channel: bool
         for j: 0..ArrayCount(reply, list) - 1 { item := ElementAt(reply, list, j); raw_id := E.Number(reply, item, "id"); if raw_id == (ifx id > 0 then id else (ifx id <= -1000000000000 then -1000000000000 - id else -id)) { title = E.String(reply, item, ifx id > 0 then "first_name" else "title"); channel = E.Raw(reply, FieldAt(reply, item, "broadcast")) == "true" } }
@@ -123,7 +234,7 @@ Dialogs :: (folder: s32) -> string {
         read_update: Vec(u8); BuilderPrint(*read_update, "{\"@type\":\"updateChatReadInbox\",\"chat_id\":%,\"last_read_inbox_message_id\":%,\"unread_count\":%}", id, E.Number(reply, at, "read_inbox_max_id"), E.Number(reply, at, "unread_count")); Push(BuilderFinish(read_update))
         if i == count - 1 {
             offset_id[folder] = E.Number(reply, at, "top_message"); offset_peer[folder] = InputPeer(id); messages := FieldAt(reply, 0, "messages")
-            for j: 0..ArrayCount(reply, messages) - 1 { m := ElementAt(reply, messages, j); if E.Number(reply, m, "id") == offset_id[folder] { offset_date[folder] = E.Number(reply, m, "date") } }
+            for j: 0..ArrayCount(reply, messages) - 1 { m := ElementAt(reply, messages, j); if E.Number(reply, m, "id") == offset_id[folder] && Messages.ChatId(E.Raw(reply,FieldAt(reply,m,"peer_id")))==id { offset_date[folder] = E.Number(reply, m, "date") } }
         }
     }; return "{\"@type\":\"ok\"}"
 }
@@ -151,9 +262,9 @@ Dispatch :: (request: string) -> string {
         else if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"channels.getMessages\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"id\":[{\"@type\":\"inputMessageID\",\"id\":%}]}", -1000000000000 - chat, E.Number(peer, 0, "access_hash"), message) }
         else { BuilderPrint(*out, "{\"@type\":\"messages.getMessages\",\"id\":[{\"@type\":\"inputMessageID\",\"id\":%}]}", message) }
         reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; rows := FieldAt(reply, 0, "messages")
-        if kind == "getMessage" { if ArrayCount(reply, rows) <= 0 { return RPC.Error(404, "Telegram message is absent") }; return Messages.Normalize(E.Raw(reply, ElementAt(reply, rows, 0)), chat) }
+        if kind == "getMessage" { if ArrayCount(reply, rows) <= 0 || E.String(reply,ElementAt(reply,rows,0),"@type")=="messageEmpty" { return RPC.Error(404, "Telegram message is absent") }; return Messages.Normalize(E.Raw(reply, ElementAt(reply, rows, 0)), chat,E.Number(account.user,0,"id")) }
         normalized: Vec(u8); BuilderPrint(*normalized, "{\"@type\":\"messages\",\"messages\":["); comma := ""
-        for i: 0..ArrayCount(reply, rows) - 1 { BuilderPrint(*normalized, "% %", comma, Messages.Normalize(E.Raw(reply, ElementAt(reply, rows, i)), chat)); comma = "," }; BuilderPrint(*normalized, "]}"); return BuilderFinish(normalized)
+        for i: 0..ArrayCount(reply, rows) - 1 { if E.String(reply,ElementAt(reply,rows,i),"@type")=="messageEmpty" { continue }; BuilderPrint(*normalized, "% %", comma, Messages.Normalize(E.Raw(reply, ElementAt(reply, rows, i)), chat,E.Number(account.user,0,"id"))); comma = "," }; BuilderPrint(*normalized, "]}"); return BuilderFinish(normalized)
     }
     if kind == "sendMessage" {
         out: Vec(u8)
@@ -162,10 +273,10 @@ Dispatch :: (request: string) -> string {
         BuilderPrint(*out, "{\"@type\":\"messages.sendMessage\",\"peer\":%,\"message\":%,\"random_id\":%}", peer, E.Quote(text), MT.Integer(random[:]))
         reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; id := E.Number(reply, 0, "id")
         rows := FieldAt(reply, 0, "updates")
-        for i: 0..ArrayCount(reply, rows) - 1 { update := E.Raw(reply, ElementAt(reply, rows, i)); if E.Kind(update) == "updateNewMessage" || E.Kind(update) == "updateNewChannelMessage" { id = E.Number(update, FieldAt(update, 0, "message"), "id") }; Update(update) }
+        for i: 0..ArrayCount(reply, rows) - 1 { update := E.Raw(reply, ElementAt(reply, rows, i)); if E.Kind(update) == "updateNewMessage" || E.Kind(update) == "updateNewChannelMessage" { id = E.Number(update, FieldAt(update, 0, "message"), "id") } else { Update(update) } }
         if id <= 0 { return RPC.Error(-1, "Telegram send outcome is unknown") }
         sent: Vec(u8); BuilderPrint(*sent, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"sending_state\":{\"@type\":\"messageSendingStatePending\"}}", id, chat); pending := BuilderFinish(sent)
-        succeeded: Vec(u8); BuilderPrint(*succeeded, "{\"@type\":\"updateMessageSendSucceeded\",\"old_message_id\":%,\"message\":{\"id\":%,\"chat_id\":%}}", id, id, chat); Push(BuilderFinish(succeeded)); return pending
+        succeeded: Vec(u8); BuilderPrint(*succeeded, "{\"@type\":\"updateMessageSendSucceeded\",\"old_message_id\":%,\"message\":{\"id\":%,\"chat_id\":%}}", id, id, chat); send_success = BuilderFinish(succeeded); return pending
     }
     if kind == "getCallbackQueryAnswer" {
         out: Vec(u8)
@@ -194,7 +305,13 @@ Send :: (client: s32, request: string) {
     if kind == "close" { Push("{\"@type\":\"updateAuthorizationState\",\"authorization_state\":{\"@type\":\"authorizationStateClosed\"}}"); return }
     if kind == "setTdlibParameters" {
         directory = E.String(request, 0, "database_directory")
-        if !Auth.Connect(*account, cast(s32)E.Number(request, 0, "api_id"), E.String(request, 0, "api_hash"), E.String(request, 0, "device_model"), Load()) { Error(account.error, extra); return }
+        path: [4096]u8
+        if !CopyCString(directory,path[:]) { Error("Telegram session directory is invalid",extra);return }
+        directory_fd=SessionOpenRaw(*path[0],720896,0)
+        if directory_fd<0 || !Private(directory_fd,cast(u32)16384) { if directory_fd>=0 { unused SessionCloseRaw(directory_fd);directory_fd=-1 };Error("Telegram session directory must be private and owner-controlled",extra);return }
+        snapshot:=Load()
+        if !Auth.Connect(*account, cast(s32)E.Number(request, 0, "api_id"), E.String(request, 0, "api_hash"), E.String(request, 0, "device_model"), snapshot) { Error(account.error, extra); return }
+        if snapshot!="" { RestoreUpdates(snapshot) }
         started = true; if !Save() { Error("Cannot save the private Telegram account session", extra); return }; Authorization(); return
     }
     if kind == "setAuthenticationPhoneNumber" || kind == "checkAuthenticationCode" || kind == "checkAuthenticationPassword" {
@@ -206,16 +323,27 @@ Send :: (client: s32, request: string) {
     }
     reply := Dispatch(request)
     if E.Kind(reply) == "rpc_error" { Error(E.String(reply, 0, "error_message"), extra) } else { Reply(reply, extra) }
+    if send_success != "" { Push(send_success); send_success = "" }
     unused Save()
 }
 Receive :: (timeout: float64) -> string {
     if head == tail && account.state == "ready" {
+        // Only checkpoint after callers have drained and applied the queue.
+        // A crash before then safely replays updates from the previous cursor.
+        Checkpoint();unused Save()
+        if account.client.connection.error!="" {
+            if !RPC.Connect(*account.client,account.client.connection.dc,account.client.connection.test) { return "" };account.client.gap=true
+        }
         unused RPC.Poll(*account.client, cast(s32)(timeout * 1000.0))
         while true { update := RPC.NextUpdate(*account.client); if update == "" { break }; Update(update) }
-        if MT.Now() >= next_sync || account.client.gap || overflow {
-            // Dialog refresh also reconciles channel unread counts after a gap.
+        if account.client.gap || overflow || MT.Now()>=next_difference {
+            if Difference() { account.client.gap=false;overflow=false;next_difference=MT.Now()+30 }
+            else { next_difference=MT.Now()+5 }
+        }
+        for i: 0..peer_count-1 { if channel_gap[i] && ChannelDifference(i) { channel_gap[i]=false } }
+        if MT.Now() >= next_sync {
             offset_id[0] = 0; offset_id[1] = 0; offset_date[0] = 0; offset_date[1] = 0; offset_peer[0] = ""; offset_peer[1] = ""
-            unused Dialogs(0); unused Dialogs(1); next_sync = MT.Now() + 60; account.client.gap = false; overflow = false
+            next_sync = MT.Now() + 60
         }
     }
     if head == tail { return "" }; value := E.Copy(queue[head]); queue[head] = ""; head = (head + 1) % 8192; return value

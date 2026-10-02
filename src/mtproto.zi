@@ -36,7 +36,7 @@ Address :: (dc: s32,test: bool) -> [4]u8 {
 Open :: (connection: *Connection,dc: s32,test: bool) -> bool {
     if dc<1 || dc>5 || (test && dc>3) { connection.error="Invalid Telegram data center"; return false }
     if connection.socket.valid { unused Socket.SocketClose(*connection.socket) }
-    connection.dc=dc;connection.test=test;connection.socket=Socket.OpenTCPv4(Address(dc,test),443,10000)
+    connection.error="";connection.dc=dc;connection.test=test;connection.socket=Socket.OpenTCPv4(Address(dc,test),443,10000)
     if !connection.socket.valid { connection.error="Cannot connect to Telegram"; return false }
     header: [4]u8=.{238,238,238,238}
     if Socket.SocketSendAll(connection.socket,header[:],10000)!=4 { connection.error="Cannot initialize Telegram transport"; return false }
@@ -50,7 +50,12 @@ Exact :: (connection: *Connection,bytes: []u8,timeout: s32) -> bool {
     at: s32;while at<bytes.count { count:=Socket.SocketReceive(connection.socket,bytes[at:],timeout);if count<=0 { return false };at+=cast(s32)count };return true
 }
 ReceivePacket :: (connection: *Connection,bytes: []u8,timeout: s32) -> s32 {
-    header: [4]u8;if !Exact(connection,header[:],timeout) { return 0 };buffer:=TL.Start(header[:]);count:=cast(s32)TL.ReadWord(*buffer)
+    // Wait before reading any frame bytes. A partial header must finish or
+    // close the connection; discarding it on a timeout loses frame alignment.
+    available := Socket.SocketWaitForEvents(connection.socket,1|8,timeout)
+    if available.error == 110 { return 0 }
+    if available.error != 0 { connection.error="Telegram connection interrupted";return -1 }
+    header: [4]u8;if !Exact(connection,header[:],10000) { connection.error="Incomplete Telegram transport header";return -1 };buffer:=TL.Start(header[:]);count:=cast(s32)TL.ReadWord(*buffer)
     if count<=0 || count>bytes.count || count%4!=0 { connection.error="Invalid Telegram transport frame";return -1 }
     if !Exact(connection,bytes[:count],10000) { connection.error="Incomplete Telegram transport frame";return -1 }
     if count==4 { connection.error="Telegram rejected the transport session";return -1 };return count

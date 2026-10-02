@@ -14,26 +14,43 @@ Peer :: (chat: s64) -> string {
     else if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"peerChannel\",\"channel_id\":%}", -1000000000000 - chat) }
     else { BuilderPrint(*out, "{\"@type\":\"peerChat\",\"chat_id\":%}", -chat) }; return BuilderFinish(out)
 }
-Normalize :: (message: string, chat: s64) -> string {
+Normalize :: (message: string, chat: s64, self: s64 = 0) -> string {
     peer := E.Raw(message, FieldAt(message, 0, "from_id")); sender := ChatId(peer); outgoing := E.Raw(message, FieldAt(message, 0, "out")) == "true"
+    if sender==0 { sender=chat;if outgoing && self>0 { sender=self } }
     out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"date\":%,\"is_outgoing\":%,\"sender_id\":{\"@type\":\"%\",\"%\":%},\"content\":", E.Number(message, 0, "id"), chat, E.Number(message, 0, "date"), ifx outgoing then "true" else "false", ifx sender > 0 then "messageSenderUser" else "messageSenderChat", ifx sender > 0 then "user_id" else "chat_id", sender)
     kind := E.Kind(message); text := E.String(message, 0, "message")
-    if kind == "messageService" { BuilderPrint(*out, "{\"@type\":\"messageChatChangeTitle\",\"title\":%}", E.Quote(E.String(message, FieldAt(message, 0, "action"), "title"))) }
+    if kind == "messageService" {
+        action:=FieldAt(message,0,"action");type:=E.String(message,action,"@type");content:="messageService"
+        if type=="messageActionChatEditTitle" { content="messageChatChangeTitle" }
+        if type=="messageActionChatEditPhoto" || type=="messageActionChatDeletePhoto" { content="messageChatChangePhoto" }
+        if type=="messageActionChatCreate" { content="messageBasicGroupChatCreate" }
+        if type=="messageActionChannelCreate" { content="messageSupergroupChatCreate" }
+        if type=="messageActionChatAddUser" { content="messageChatAddMembers" }
+        if type=="messageActionChatDeleteUser" { content="messageChatDeleteMember" }
+        if type=="messageActionChatJoinedByLink" { content="messageChatJoinByLink" }
+        if type=="messageActionChatJoinedByRequest" { content="messageChatJoinByRequest" }
+        if type=="messageActionPinMessage" { content="messagePinMessage" }
+        BuilderPrint(*out,"{\"@type\":%,\"title\":%}",E.Quote(content),E.Quote(E.String(message,action,"title")))
+    }
     else {
         media := FieldAt(message, 0, "media"); media_kind := E.String(message, media, "@type")
         if media_kind == "messageMediaPhoto" { BuilderPrint(*out, "{\"@type\":\"messagePhoto\",\"caption\":{\"text\":%}}", E.Quote(text)) }
         else if media_kind == "messageMediaDocument" {
-            document := FieldAt(message, media, "document"); attributes := FieldAt(message, document, "attributes"); name := "Attachment"; content := "messageDocument"
+            document := FieldAt(message, media, "document"); attributes := FieldAt(message, document, "attributes"); name := "Attachment"; content := "messageDocument";title:="";emoji:=""
             for i: 0..ArrayCount(message, attributes) - 1 {
                 at := ElementAt(message, attributes, i); attribute := E.String(message, at, "@type")
                 if attribute == "documentAttributeFilename" { name = E.String(message, at, "file_name") }
                 if attribute == "documentAttributeVideo" { content = "messageVideo" }
                 if attribute == "documentAttributeAnimated" { content = "messageAnimation" }
-                if attribute == "documentAttributeAudio" { content = "messageAudio"; if E.Raw(message, FieldAt(message, at, "voice")) == "true" { content = "messageVoiceNote" } }
-                if attribute == "documentAttributeSticker" { content = "messageSticker" }
+                if attribute == "documentAttributeAudio" { content = "messageAudio";title=E.String(message,at,"title"); if E.Raw(message, FieldAt(message, at, "voice")) == "true" { content = "messageVoiceNote" } }
+                if attribute == "documentAttributeSticker" { content = "messageSticker";emoji=E.String(message,at,"alt") }
             }
-            BuilderPrint(*out, "{\"@type\":%,\"document\":{\"file_name\":%},\"caption\":{\"text\":%}}", E.Quote(content), E.Quote(name), E.Quote(text))
+            if title=="" { title=name }
+            BuilderPrint(*out, "{\"@type\":%,\"document\":{\"file_name\":%},\"audio\":{\"title\":%},\"sticker\":{\"emoji\":%},\"caption\":{\"text\":%}}", E.Quote(content), E.Quote(name),E.Quote(title),E.Quote(emoji), E.Quote(text))
         }
+        else if media_kind=="messageMediaGeo" || media_kind=="messageMediaGeoLive" || media_kind=="messageMediaVenue" { BuilderPrint(*out,"{\"@type\":\"messageLocation\",\"caption\":{\"text\":%}}",E.Quote(text)) }
+        else if media_kind=="messageMediaContact" { BuilderPrint(*out,"{\"@type\":\"messageContact\",\"caption\":{\"text\":%}}",E.Quote(text)) }
+        else if media_kind=="messageMediaPoll" { BuilderPrint(*out,"{\"@type\":\"messagePoll\",\"poll\":{\"question\":{\"text\":%}}}",E.Quote(E.String(message,FieldAt(message,FieldAt(message,media,"poll"),"question"),"text"))) }
         else { BuilderPrint(*out, "{\"@type\":\"messageText\",\"text\":{\"@type\":\"formattedText\",\"text\":%}}", E.Quote(text)) }
     }
     markup := FieldAt(message, 0, "reply_markup")

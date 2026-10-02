@@ -89,9 +89,20 @@ Request :: (account: *Account, query: string) -> string {
         prefixes: [3]string = .{"PHONE_MIGRATE_", "NETWORK_MIGRATE_", "USER_MIGRATE_"}
         for i: 0..2 { p := prefixes[i]; if message.count > p.count && message[:p.count] == p { dc = cast(s32)E.Integer(message[p.count:]) } }
         if dc == 0 || dc == account.client.connection.dc { return reply }
-        if account.state == "ready" { return RPC.Error(303, "Account migration requires sign-in again") }
+        transfer := ""
+        if account.state == "ready" {
+            out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"auth.exportAuthorization\",\"dc_id\":%}", dc)
+            transfer = RPC.Request(*account.client, BuilderFinish(out))
+            if E.Kind(transfer) != "auth.exportedAuthorization" { return transfer }
+        }
         account.client.connection.ready = false; Crypto.Wipe(account.client.connection.key[:])
         if !RPC.Connect(*account.client, dc, account.client.connection.test) { return RPC.Error(-1, account.client.connection.error) }
+        if transfer != "" {
+            out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"auth.importAuthorization\",\"id\":%,\"bytes\":%}", E.Number(transfer, 0, "id"), E.Quote(E.String(transfer, 0, "bytes")))
+            imported := RPC.Request(*account.client, BuilderFinish(out))
+            if E.Kind(imported) != "auth.authorization" { return imported }
+            account.client.gap = true
+        }
     }; return RPC.Error(-1, "Telegram sign-in migration limit reached")
 }
 Advance :: (account: *Account, reply: string) -> bool {

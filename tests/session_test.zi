@@ -1,0 +1,29 @@
+Session :: #import "session";
+E :: #import "encoding";
+Auth :: #import "auth";
+#import "std/json_scan"
+Main :: () -> s32 {
+    failures: s32
+    Session.pts=10;Session.date=100
+    Session.Update("{\"@type\":\"updateShortMessage\",\"id\":12,\"user_id\":66,\"message\":\"Hello 🙂\",\"pts\":11,\"pts_count\":1,\"date\":101}")
+    first:=Session.Receive(0.0);message:=E.Raw(first,FieldAt(first,0,"message"))
+    // Check the normalized object rather than any serializer whitespace.
+    content:=FieldAt(message,0,"content")
+    if E.Kind(first)!="updateNewMessage" || Session.pts!=11 || E.Number(message,0,"chat_id")!=66 || E.String(message,FieldAt(message,content,"text"),"text")!="Hello 🙂" { failures+=1;print("FAIL short-message delivery\n") }
+    Session.Update("{\"@type\":\"updateShortMessage\",\"id\":12,\"user_id\":66,\"message\":\"Hello 🙂\",\"pts\":11,\"pts_count\":1,\"date\":101}")
+    if Session.Receive(0.0)!="" { failures+=1;print("FAIL duplicate sequence suppressed\n") }
+    Session.Update("{\"@type\":\"updateDeleteMessages\",\"messages\":[12],\"pts\":12,\"pts_count\":1}")
+    deleted:=Session.Receive(0.0)
+    if E.Kind(deleted)!="updateDeleteMessages" || E.Number(deleted,0,"chat_id")!=0 { failures+=1;print("FAIL account-wide deletion identity\n") }
+    Session.peer_ids[0]=-1000000000099;Session.peer_hashes[0]=9007199254740993;Session.peer_count=1;Session.channel_pts[0]=4
+    Session.Update("{\"@type\":\"updateDeleteChannelMessages\",\"channel_id\":99,\"messages\":[12],\"pts\":5,\"pts_count\":1}")
+    deleted=Session.Receive(0.0)
+    if E.Number(deleted,0,"chat_id")!=-1000000000099 || Session.channel_pts[0]!=5 || Session.pts!=12 { failures+=1;print("FAIL independent channel cursor\n") }
+    Session.Update("{\"@type\":\"updateShortChatMessage\",\"id\":13,\"chat_id\":42,\"from_id\":66,\"message\":\"Missed event\",\"pts\":15,\"pts_count\":1,\"date\":103}")
+    unused Session.Receive(0.0)
+    current: Auth.Account = Session.account
+    if !current.client.gap || Session.pts!=12 { failures+=1;print("FAIL missing sequence triggers recovery without skipping cursor\n") }
+    Session.Checkpoint();snapshot:=Session.Snapshot();Session.pts=0;Session.peer_count=0;Session.RestoreUpdates(snapshot)
+    if Session.pts!=12 || Session.channel_pts[0]!=5 || Session.peer_hashes[0]!=9007199254740993 { failures+=1;print("FAIL durable update cursors and exact peer hash\n") }
+    print("Telegram update sessions: % failures\n",failures);return failures
+}

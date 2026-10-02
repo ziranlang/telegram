@@ -86,7 +86,7 @@ Request :: (client: *Client,query: string) -> string {
     for attempt: 0..2 {
         client.response="";client.retry=false;client.pending=Send(client,body,true)
         if client.pending==0 { return Error(-1,client.connection.error) };deadline:=MT.Now()+30
-        while MT.Now()<deadline && client.response=="" && !client.retry { unused Poll(client,500) }
+        while MT.Now()<deadline && client.response=="" && !client.retry { unused Poll(client,500);if client.connection.error!="" { break } }
         if client.retry { continue };client.pending=0
         if client.response=="" { return Error(-1,"Telegram response was not received; delivery is unknown") }
         if E.Kind(client.response)!="rpc_error" { client.initialized=true };return E.Copy(client.response)
