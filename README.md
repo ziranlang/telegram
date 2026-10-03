@@ -36,10 +36,13 @@ calling `Receive` again: update cursors are checkpointed after the queue is
 drained so interrupted processing can replay safely.
 
 The high-level session covers the operations used by account chat mirrors;
-it is not a complete Telegram application. Other API methods can be called
-through `client` and the bundled TL schema. Secret chats, account registration,
-media transfer and interactive email enrollment do not have high-level session
-helpers.
+it is not a complete Telegram application. `loadChats` announces every chat
+with its full name, newest message and mute state. `downloadMessageFile`
+saves a message's photo or document to a new owner-only file, connecting to
+the file's data center when it differs from the account's. Other API
+methods can be called through `client` and the bundled TL schema. Secret
+chats, account registration, uploads and interactive email enrollment do
+not have high-level session helpers.
 
 Run `make check test` for offline TL, SRP, normalization and update-sequence
 checks. `make rpc-test` is an explicit network test: it performs an encrypted
