@@ -39,10 +39,16 @@ The high-level session covers the operations used by account chat mirrors;
 it is not a complete Telegram application. `loadChats` announces every chat
 with its full name, newest message and mute state. `downloadMessageFile`
 saves a message's photo or document to a new owner-only file, connecting to
-the file's data center when it differs from the account's. Other API
+the file's data center when it differs from the account's;
+`downloadChatPhoto` does the same for a chat's small profile photo.
+`sendMessage` sends text, or uploads a local photo or document
+(`inputMessagePhoto` / `inputMessageDocument` with a `path`), optionally as a
+reply. `forwardMessages` forwards messages between chats and `searchChats`
+finds people, bots, groups and channels by name, @username or +phone.
+Normalized messages carry `reply_to_message_id` and `forward_info`. Other API
 methods can be called through `client` and the bundled TL schema. Secret
-chats, account registration, uploads and interactive email enrollment do
-not have high-level session helpers.
+chats, account registration and interactive email enrollment do not have
+high-level session helpers.
 
 Run `make check test` for offline TL, SRP, normalization and update-sequence
 checks. `make rpc-test` is an explicit network test: it performs an encrypted

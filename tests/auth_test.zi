@@ -2,6 +2,7 @@ Auth :: #import "auth";
 E :: #import "encoding";
 Messages :: #import "messages";
 TL :: #import "tl";
+#import "std/json_scan"
 Main :: () -> s32 {
     failures: s32; entropy: [256]u8
     for i: 0..255 { entropy[i] = cast(u8)i }
@@ -20,5 +21,19 @@ Main :: () -> s32 {
     message := "{\"@type\":\"message\",\"id\":12,\"peer_id\":{\"@type\":\"peerChannel\",\"channel_id\":99},\"from_id\":{\"@type\":\"peerUser\",\"user_id\":55},\"date\":100,\"message\":\"Approve?\",\"reply_markup\":{\"@type\":\"replyInlineMarkup\",\"rows\":[{\"buttons\":[{\"@type\":\"keyboardButtonCallback\",\"text\":\"Approve\",\"data\":\"AP8=\"}]}]}}"
     normalized := Messages.Normalize(message,-1000000000099)
     if E.Number(normalized,0,"id")!=12 || E.Number(normalized,0,"chat_id")!=-1000000000099 { print("FAIL source identity\n"); failures+=1 }
+    reply := "{\"@type\":\"message\",\"id\":13,\"peer_id\":{\"@type\":\"peerUser\",\"user_id\":55},\"from_id\":{\"@type\":\"peerUser\",\"user_id\":55},\"date\":101,\"message\":\"Sure\",\"reply_to\":{\"@type\":\"messageReplyHeader\",\"reply_to_msg_id\":12},\"fwd_from\":{\"@type\":\"messageFwdHeader\",\"from_id\":{\"@type\":\"peerChannel\",\"channel_id\":7},\"date\":90}}"
+    answered := Messages.Normalize(reply,55); origin := FieldAt(answered,0,"forward_info")
+    if E.Number(answered,0,"reply_to_message_id")!=12 || E.Number(answered,origin,"from_id")!=-1000000000007 { print("FAIL reply and forward origin\n"); failures+=1 }
+    if FieldAt(normalized,0,"reply_to_message_id")>=0 || FieldAt(normalized,0,"forward_info")>=0 { print("FAIL plain messages carry no reply or forward\n"); failures+=1 }
+    // Requests the session builds must encode with the bundled schema.
+    requests: [5]string = .{
+        "{\"@type\":\"messages.sendMessage\",\"peer\":{\"@type\":\"inputPeerUser\",\"user_id\":55,\"access_hash\":9},\"reply_to\":{\"@type\":\"inputReplyToMessage\",\"reply_to_msg_id\":12},\"message\":\"Sure\",\"random_id\":7}",
+        "{\"@type\":\"messages.sendMedia\",\"peer\":{\"@type\":\"inputPeerSelf\"},\"media\":{\"@type\":\"inputMediaUploadedDocument\",\"file\":{\"@type\":\"inputFile\",\"id\":5,\"parts\":1,\"name\":\"a.txt\",\"md5_checksum\":\"\"},\"mime_type\":\"text/plain\",\"attributes\":[{\"@type\":\"documentAttributeFilename\",\"file_name\":\"a.txt\"}]},\"message\":\"\",\"random_id\":8}",
+        "{\"@type\":\"messages.forwardMessages\",\"from_peer\":{\"@type\":\"inputPeerSelf\"},\"id\":[1,2],\"random_id\":[3,4],\"to_peer\":{\"@type\":\"inputPeerChat\",\"chat_id\":9}}",
+        "{\"@type\":\"upload.saveBigFilePart\",\"file_id\":5,\"file_part\":0,\"file_total_parts\":30,\"bytes\":\"AP8=\"}",
+        "{\"@type\":\"contacts.search\",\"q\":\"alice\",\"limit\":20}"}
+    for i: 0..4 { if TL.Encode(requests[i],bytes[:])<=0 { print("FAIL encode session request %\n",i); failures+=1 } }
+    photo := "{\"@type\":\"upload.getFile\",\"location\":{\"@type\":\"inputPeerPhotoFileLocation\",\"peer\":{\"@type\":\"inputPeerSelf\"},\"photo_id\":5123456789012345678},\"offset\":0,\"limit\":524288}"
+    if TL.Encode(photo,bytes[:])<=0 { print("FAIL encode chat photo location\n"); failures+=1 }
     print("Telegram auth and normalization: % failures\n",failures); return failures
 }

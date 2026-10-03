@@ -233,7 +233,7 @@ Announce :: (reply: string, folder: s32) -> s32 {
         slot:=PeerSlot(id);remote_pts:=E.Number(reply,at,"pts")
         if slot>=0 && id<=-1000000000000 && remote_pts>0 { if channel_pts[slot]==0 { channel_pts[slot]=remote_pts } else if remote_pts>channel_pts[slot] { channel_gap[slot]=true } }
         if id < 0 { type = "chatTypeBasicGroup" }; if id <= -1000000000000 { type = "chatTypeSupergroup" }
-        list := FieldAt(reply, 0, ifx id > 0 then "users" else "chats"); channel: bool; bot: bool
+        list := FieldAt(reply, 0, ifx id > 0 then "users" else "chats"); channel: bool; bot: bool; photo_id := ""; photo_dc: s64
         for j: 0..ArrayCount(reply, list) - 1 {
             item := ElementAt(reply, list, j); raw_id := E.Number(reply, item, "id")
             if raw_id != (ifx id > 0 then id else (ifx id <= -1000000000000 then -1000000000000 - id else -id)) { continue }
@@ -242,10 +242,13 @@ Announce :: (reply: string, folder: s32) -> s32 {
                 if last != "" { title = ifx title == "" then last else Join(title, Join(" ", last)) }
                 if title == "" { title = "Deleted account" }; bot = E.Raw(reply, FieldAt(reply, item, "bot")) == "true"
             } else { title = E.String(reply, item, "title"); channel = E.Raw(reply, FieldAt(reply, item, "broadcast")) == "true" }
+            // 64-bit photo IDs travel as text so JSON readers keep every digit.
+            photo := FieldAt(reply, item, "photo")
+            if E.String(reply, photo, "@type") == "userProfilePhoto" || E.String(reply, photo, "@type") == "chatPhoto" { photo_id = E.Raw(reply, FieldAt(reply, photo, "photo_id")); photo_dc = E.Number(reply, photo, "dc_id") }
         }
         if id == self && self != 0 { title = "Saved Messages" }
         settings := FieldAt(reply, at, "notify_settings"); muted := E.Number(reply, settings, "mute_until") > MT.Now()
-        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%,\"is_bot\":%},\"last_message_id\":%,\"is_muted\":%,\"folder\":%}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false", ifx bot then "true" else "false", E.Number(reply, at, "top_message"), ifx muted then "true" else "false", folder); Push(BuilderFinish(announce))
+        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%,\"is_bot\":%},\"last_message_id\":%,\"is_muted\":%,\"folder\":%,\"photo_id\":%,\"photo_dc\":%}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false", ifx bot then "true" else "false", E.Number(reply, at, "top_message"), ifx muted then "true" else "false", folder, E.Quote(photo_id), photo_dc); Push(BuilderFinish(announce))
         read_update: Vec(u8); BuilderPrint(*read_update, "{\"@type\":\"updateChatReadInbox\",\"chat_id\":%,\"last_read_inbox_message_id\":%,\"unread_count\":%}", id, E.Number(reply, at, "read_inbox_max_id"), E.Number(reply, at, "unread_count")); Push(BuilderFinish(read_update))
         if i == count - 1 {
             offset_id[folder] = E.Number(reply, at, "top_message"); offset_peer[folder] = InputPeer(id); messages := FieldAt(reply, 0, "messages")
@@ -316,7 +319,11 @@ Download :: (request: string) -> string {
         for i: 0..ArrayCount(message, attributes) - 1 { at := ElementAt(message, attributes, i); if E.String(message, at, "@type") == "documentAttributeFilename" { name = E.String(message, at, "file_name") } }
     } else { return RPC.Error(404, "Telegram message has no downloadable media") }
     if most > 0 && size > most { out: Vec(u8); BuilderPrint(*out, "FILE_TOO_LARGE_%", size); return RPC.Error(413, BuilderFinish(out)) }
-    place := BuilderFinish(location); path: [4096]u8; if !CopyCString(destination, path[:]) { return RPC.Error(400, "Invalid download destination") }
+    return Fetch(BuilderFinish(location), dc, destination, mime, name)
+}
+// Saves the file at location on data center dc to a new owner-only file.
+Fetch :: (place: string, dc: s32, destination: string, mime: string, name: string) -> string {
+    path: [4096]u8; if !CopyCString(destination, path[:]) { return RPC.Error(400, "Invalid download destination") }
     // O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW|O_CLOEXEC, owner-only.
     fd := SessionOpenRaw(*path[0], 1|64|128|131072|524288, 384); if fd < 0 { return RPC.Error(-1, "Cannot create the download file") }
     buffer_memory := SessionAllocateRaw(524288, 1); if buffer_memory == null { unused SessionCloseRaw(fd); unused SessionUnlinkRaw(-100, *path[0], 0); return RPC.Error(-1, "Out of memory") }
@@ -346,10 +353,134 @@ Download :: (request: string) -> string {
     output: [32]u8; Hash.Sha256Finish(*digest, *output[0]); out: Vec(u8)
     BuilderPrint(*out, "{\"@type\":\"file\",\"size\":%,\"mime_type\":%,\"name\":%,\"sha256\":%}", offset, E.Quote(mime), E.Quote(name), E.Quote(E.Hex(output[:]))); return BuilderFinish(out)
 }
+// A chat's small profile photo (160 by 160 JPEG) as a new owner-only file.
+ChatPhoto :: (request: string) -> string {
+    chat := E.Number(request, 0, "chat_id"); photo := E.String(request, 0, "photo_id"); dc := cast(s32)E.Number(request, 0, "photo_dc")
+    if photo == "" || E.Integer(photo) == 0 { return RPC.Error(404, "Telegram chat has no photo") }
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"inputPeerPhotoFileLocation\",\"peer\":%,\"photo_id\":%}", InputPeer(chat), E.Integer(photo))
+    return Fetch(BuilderFinish(out), dc, E.String(request, 0, "destination"), "image/jpeg", "photo.jpg")
+}
+// Uploads a local file in 512 KiB parts and returns its InputFile.
+upload_error: string;
+Upload :: (path: string, name: string) -> string {
+    upload_error = ""; bytes: [4096]u8; if !CopyCString(path, bytes[:]) { upload_error = "Invalid file path"; return "" }
+    // O_RDONLY|O_NOFOLLOW|O_CLOEXEC
+    fd := SessionOpenRaw(*bytes[0], 131072|524288, 0); if fd < 0 { upload_error = "Cannot open the file to send"; return "" }
+    defer { unused SessionCloseRaw(fd) }
+    metadata: [256]u8; empty: [1]u8
+    // STATX_SIZE; stx_size is the u64 at offset 40.
+    if SessionStatRaw(fd, *empty[0], 4096, 512, *metadata[0]) != 0 { upload_error = "Cannot read the file to send"; return "" }
+    size: s64; for i: 0..7 { size |= cast(s64)metadata[40 + i] << cast(s64)(8 * i) }
+    parts := (size + 524287) / 524288; big := size > 10485760
+    if size <= 0 || parts > 4000 { upload_error = "Telegram sends files from 1 byte to 2 GiB"; return "" }
+    random: [8]u8; if !Random.FillSecure(random[:]) { upload_error = "Secure randomness unavailable"; return "" }; file_id := MT.Integer(random[:])
+    memory := SessionAllocateRaw(524288, 1); if memory == null { upload_error = "Out of memory"; return "" }; defer { SessionFreeRaw(memory) }
+    buffer := BytesFromPointer(memory, 524288)
+    for part: 0..cast(s32)parts - 1 {
+        count: s64 = 0
+        while count < 524288 { got := SessionReadRaw(fd, *buffer[count], cast(usize)(524288 - count)); if got <= 0 { break }; count += got }
+        if count <= 0 || (count < 524288 && cast(s64)part != parts - 1) { upload_error = "The file changed while sending"; return "" }
+        encoded := E.Base64(buffer[:count]); out: Vec(u8)
+        if big { BuilderPrint(*out, "{\"@type\":\"upload.saveBigFilePart\",\"file_id\":%,\"file_part\":%,\"file_total_parts\":%,\"bytes\":\"%\"}", file_id, part, parts, encoded) }
+        else { BuilderPrint(*out, "{\"@type\":\"upload.saveFilePart\",\"file_id\":%,\"file_part\":%,\"bytes\":\"%\"}", file_id, part, encoded) }
+        query := BuilderFinish(out); Release(encoded)
+        reply := Auth.Request(*account, query); Release(query)
+        failed := E.Kind(reply) == "rpc_error" || E.Kind(reply) == "boolFalse" || reply == "false"
+        if failed { upload_error = E.String(reply, 0, "error_message"); if upload_error == "" { upload_error = "Telegram refused a file part" }; return "" }
+        Release(reply)
+    }
+    out: Vec(u8)
+    if big { BuilderPrint(*out, "{\"@type\":\"inputFileBig\",\"id\":%,\"parts\":%,\"name\":%}", file_id, parts, E.Quote(name)) }
+    else { BuilderPrint(*out, "{\"@type\":\"inputFile\",\"id\":%,\"parts\":%,\"name\":%,\"md5_checksum\":\"\"}", file_id, parts, E.Quote(name)) }
+    return BuilderFinish(out)
+}
+ReplyTo :: (request: string) -> string {
+    message := E.Number(request, 0, "reply_to_message_id"); if message <= 0 { return "" }
+    out: Vec(u8); BuilderPrint(*out, ",\"reply_to\":{\"@type\":\"inputReplyToMessage\",\"reply_to_msg_id\":%}", message); return BuilderFinish(out)
+}
+// The new message's ID from a send reply; other updates apply as usual.
+SentId :: (reply: string) -> s64 {
+    id := E.Number(reply, 0, "id"); rows := FieldAt(reply, 0, "updates")
+    for i: 0..ArrayCount(reply, rows) - 1 { update := E.Raw(reply, ElementAt(reply, rows, i)); if E.Kind(update) == "updateNewMessage" || E.Kind(update) == "updateNewChannelMessage" { id = E.Number(update, FieldAt(update, 0, "message"), "id") } else { Update(update) } }
+    return id
+}
+Pending :: (chat: s64, id: s64) -> string {
+    if id <= 0 { return RPC.Error(-1, "Telegram send outcome is unknown") }
+    sent: Vec(u8); BuilderPrint(*sent, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"sending_state\":{\"@type\":\"messageSendingStatePending\"}}", id, chat); pending := BuilderFinish(sent)
+    succeeded: Vec(u8); BuilderPrint(*succeeded, "{\"@type\":\"updateMessageSendSucceeded\",\"old_message_id\":%,\"message\":{\"id\":%,\"chat_id\":%}}", id, id, chat); send_success = BuilderFinish(succeeded); return pending
+}
+// A photo or document from a local path, with an optional caption.
+SendMedia :: (request: string, chat: s64, peer: string) -> string {
+    content := FieldAt(request, 0, "input_message_content"); kind := E.String(request, content, "@type"); path := E.String(request, content, "path")
+    name := E.String(request, content, "file_name"); if name == "" { start: s32 = 0; for i: 0..cast(s32)path.count - 1 { if path[i] == cast(u8)47 { start = i + 1 } }; name = path[start:] }
+    file := Upload(path, name); if file == "" { return RPC.Error(-1, upload_error) }
+    media: Vec(u8)
+    if kind == "inputMessagePhoto" { BuilderPrint(*media, "{\"@type\":\"inputMediaUploadedPhoto\",\"file\":%}", file) }
+    else { mime := E.String(request, content, "mime_type"); if mime == "" { mime = "application/octet-stream" }; BuilderPrint(*media, "{\"@type\":\"inputMediaUploadedDocument\",\"file\":%,\"mime_type\":%,\"attributes\":[{\"@type\":\"documentAttributeFilename\",\"file_name\":%}]}", file, E.Quote(mime), E.Quote(name)) }
+    random: [8]u8; if !Random.FillSecure(random[:]) { return RPC.Error(-1, "Secure randomness unavailable") }
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"messages.sendMedia\",\"peer\":%,\"media\":%,\"message\":%,\"random_id\":%}", Join(peer, ReplyTo(request)), BuilderFinish(media), E.Quote(E.String(request, FieldAt(request, content, "caption"), "text")), MT.Integer(random[:]))
+    reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; return Pending(chat, SentId(reply))
+}
+// Forwards messages of one chat to another as the account.
+Forward :: (request: string, peer: string) -> string {
+    from := E.Number(request, 0, "from_chat_id"); ids := FieldAt(request, 0, "message_ids"); count := ArrayCount(request, ids)
+    if count <= 0 || count > 100 { return RPC.Error(400, "Forward 1 to 100 messages") }
+    list: Vec(u8); randoms: Vec(u8)
+    for i: 0..count - 1 {
+        random: [8]u8; if !Random.FillSecure(random[:]) { return RPC.Error(-1, "Secure randomness unavailable") }
+        if i > 0 { BuilderPrint(*list, ","); BuilderPrint(*randoms, ",") }
+        BuilderPrint(*list, "%", E.Integer(E.Raw(request, ElementAt(request, ids, i)))); BuilderPrint(*randoms, "%", MT.Integer(random[:]))
+    }
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"messages.forwardMessages\",\"from_peer\":%,\"id\":[%],\"random_id\":[%],\"to_peer\":%}", InputPeer(from), BuilderFinish(list), BuilderFinish(randoms), peer)
+    reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }
+    // The forwarded copies arrive as ordinary new messages.
+    rows := FieldAt(reply, 0, "updates"); for i: 0..ArrayCount(reply, rows) - 1 { Update(E.Raw(reply, ElementAt(reply, rows, i))) }
+    return "{\"@type\":\"ok\"}"
+}
+// People, bots, groups and channels matching a name, @username or +phone.
+found_ids: [64]s64;
+found_count: s32;
+Found :: (out: *Vec(u8), reply: string, comma: *string) {
+    fields: [2]string = .{"users", "chats"}
+    for field: 0..1 {
+        rows := FieldAt(reply, 0, fields[field])
+        for i: 0..ArrayCount(reply, rows) - 1 {
+            at := ElementAt(reply, rows, i); kind := E.String(reply, at, "@type"); raw := E.Number(reply, at, "id"); id := raw; title := ""; type := "user"
+            if kind == "user" {
+                title = E.String(reply, at, "first_name"); last := E.String(reply, at, "last_name"); if last != "" { title = ifx title == "" then last else Join(title, Join(" ", last)) }
+                if E.Raw(reply, FieldAt(reply, at, "bot")) == "true" { type = "bot" }
+            } else if kind == "chat" { id = -raw; title = E.String(reply, at, "title"); type = "group" }
+            else if kind == "channel" { id = -1000000000000 - raw; title = E.String(reply, at, "title"); type = ifx E.Raw(reply, FieldAt(reply, at, "broadcast")) == "true" then "channel" else "group" }
+            else { continue }
+            known := false; for j: 0..found_count - 1 { if found_ids[j] == id { known = true } }
+            if known || found_count >= 64 { continue }; found_ids[found_count] = id; found_count += 1
+            if id == E.Number(account.user, 0, "id") { title = "Saved Messages" }
+            BuilderPrint(out, "%{\"id\":%,\"title\":%,\"username\":%,\"type\":%}", comma.*, id, E.Quote(title), E.Quote(E.String(reply, at, "username")), E.Quote(type)); comma.* = ","
+        }
+    }
+}
+SearchChats :: (request: string) -> string {
+    raw := E.String(request, 0, "query"); start: s32 = 0; end := cast(s32)raw.count; spaced := false
+    while start < end && raw[start] <= cast(u8)32 { start += 1 }
+    while end > start && raw[end - 1] <= cast(u8)32 { end -= 1 }
+    query := raw[start:end]; for i: 0..cast(s32)query.count - 1 { if query[i] == cast(u8)32 { spaced = true } }
+    if query == "" || query.count > 64 { return RPC.Error(400, "Search for a name, @username or +phone") }
+    out: Vec(u8); comma := ""; found_count = 0; BuilderPrint(*out, "{\"@type\":\"chats\",\"chats\":[")
+    exact: Vec(u8)
+    username := query; if username[0] == cast(u8)64 { username = username[1:] }
+    if query[0] == cast(u8)43 { BuilderPrint(*exact, "{\"@type\":\"contacts.resolvePhone\",\"phone\":%}", E.Quote(query[1:])) } else if !spaced && username != "" { BuilderPrint(*exact, "{\"@type\":\"contacts.resolveUsername\",\"username\":%}", E.Quote(username)) }
+    lookup := BuilderFinish(exact); if lookup != "" { reply := Request(lookup); if E.Kind(reply) != "rpc_error" { Found(*out, reply, *comma) } }
+    search: Vec(u8); BuilderPrint(*search, "{\"@type\":\"contacts.search\",\"q\":%,\"limit\":20}", E.Quote(query))
+    reply := Request(BuilderFinish(search)); if E.Kind(reply) != "rpc_error" { Found(*out, reply, *comma) } else if comma == "" { return reply }
+    BuilderPrint(*out, "]}"); return BuilderFinish(out)
+}
 Dispatch :: (request: string) -> string {
     kind := E.Kind(request); chat := E.Number(request, 0, "chat_id"); message := E.Number(request, 0, "message_id"); peer := InputPeer(chat)
     if kind == "getMe" { return account.user }
     if kind == "downloadMessageFile" { return Download(request) }
+    if kind == "downloadChatPhoto" { return ChatPhoto(request) }
+    if kind == "searchChats" { return SearchChats(request) }
+    if kind == "forwardMessages" { return Forward(request, peer) }
     if kind == "loadChats" { return Dialogs(ifx E.String(request, FieldAt(request, 0, "chat_list"), "@type") == "chatListArchive" then 1 else 0) }
     if kind == "getChatMember" {
         out: Vec(u8)
@@ -378,16 +509,13 @@ Dispatch :: (request: string) -> string {
         for i: 0..ArrayCount(reply, rows) - 1 { if E.String(reply,ElementAt(reply,rows,i),"@type")=="messageEmpty" { continue }; BuilderPrint(*normalized, "% %", comma, Messages.Normalize(E.Raw(reply, ElementAt(reply, rows, i)), chat,E.Number(account.user,0,"id"))); comma = "," }; BuilderPrint(*normalized, "]}"); return BuilderFinish(normalized)
     }
     if kind == "sendMessage" {
+        content_kind := E.String(request, FieldAt(request, 0, "input_message_content"), "@type")
+        if content_kind == "inputMessagePhoto" || content_kind == "inputMessageDocument" { return SendMedia(request, chat, peer) }
         out: Vec(u8)
         random: [8]u8; if !Random.FillSecure(random[:]) { return RPC.Error(-1, "Secure randomness unavailable") }
         text := E.String(request, FieldAt(request, FieldAt(request, 0, "input_message_content"), "text"), "text")
-        BuilderPrint(*out, "{\"@type\":\"messages.sendMessage\",\"peer\":%,\"message\":%,\"random_id\":%}", peer, E.Quote(text), MT.Integer(random[:]))
-        reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; id := E.Number(reply, 0, "id")
-        rows := FieldAt(reply, 0, "updates")
-        for i: 0..ArrayCount(reply, rows) - 1 { update := E.Raw(reply, ElementAt(reply, rows, i)); if E.Kind(update) == "updateNewMessage" || E.Kind(update) == "updateNewChannelMessage" { id = E.Number(update, FieldAt(update, 0, "message"), "id") } else { Update(update) } }
-        if id <= 0 { return RPC.Error(-1, "Telegram send outcome is unknown") }
-        sent: Vec(u8); BuilderPrint(*sent, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"sending_state\":{\"@type\":\"messageSendingStatePending\"}}", id, chat); pending := BuilderFinish(sent)
-        succeeded: Vec(u8); BuilderPrint(*succeeded, "{\"@type\":\"updateMessageSendSucceeded\",\"old_message_id\":%,\"message\":{\"id\":%,\"chat_id\":%}}", id, id, chat); send_success = BuilderFinish(succeeded); return pending
+        BuilderPrint(*out, "{\"@type\":\"messages.sendMessage\",\"peer\":%,\"message\":%,\"random_id\":%}", Join(peer, ReplyTo(request)), E.Quote(text), MT.Integer(random[:]))
+        reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; return Pending(chat, SentId(reply))
     }
     if kind == "getCallbackQueryAnswer" {
         out: Vec(u8)
