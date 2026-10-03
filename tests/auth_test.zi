@@ -3,6 +3,7 @@ E :: #import "encoding";
 Messages :: #import "messages";
 TL :: #import "tl";
 #import "std/json_scan"
+#import "std/text"
 Main :: () -> s32 {
     failures: s32; entropy: [256]u8
     for i: 0..255 { entropy[i] = cast(u8)i }
@@ -15,6 +16,13 @@ Main :: () -> s32 {
     snapshot := Auth.Snapshot(*account); restored: Auth.Account
     if !Auth.Restore(*restored,snapshot) || restored.client.connection.salt != -9007199254740993 || restored.client.connection.key[255] != cast(u8)255 { print("FAIL session round trip\n"); failures+=1 }
     if Auth.Restore(*restored,"{\"format\":1,\"dc\":2,\"test\":false,\"key\":\"bad\"}") { print("FAIL corrupt key rejected\n"); failures+=1 }
+    // Reuse the independently checked public SRP parameters.
+    out: Vec(u8); BuilderPrint(*out,"{\"@type\":\"account.password\",%",parameters[1:]); challenge:=BuilderFinish(out)
+    if !Auth.ResumePassword(*restored,challenge) || restored.state != "password" || restored.password_parameters != challenge { print("FAIL restore pending two-factor challenge\n");failures+=1 }
+    if Auth.ResumePassword(*restored,"{\"@type\":\"rpc_error\"}") || Auth.ResumePassword(*restored,"{\"@type\":\"account.password\"}") { print("FAIL reject incomplete two-factor challenge\n");failures+=1 }
+    restored.phone="private phone";restored.code_hash="private code hash"
+    private_snapshot:=Auth.Snapshot(*restored)
+    if FieldAt(private_snapshot,0,"phone")>=0 || FieldAt(private_snapshot,0,"code_hash")>=0 || FieldAt(private_snapshot,0,"password_parameters")>=0 { print("FAIL sign-in secrets excluded from snapshots\n");failures+=1 }
     bytes: [4096]u8
     init := "{\"@type\":\"invokeWithLayer\",\"layer\":227,\"query\":{\"@type\":\"initConnection\",\"api_id\":123,\"device_model\":\"Ziran\",\"system_version\":\"Linux\",\"app_version\":\"1.0\",\"system_lang_code\":\"en\",\"lang_pack\":\"\",\"lang_code\":\"en\",\"query\":{\"@type\":\"help.getConfig\"}}}"
     if TL.Encode(init,bytes[:])<=0 { print("FAIL generic initialization encoding\n"); failures+=1 }
