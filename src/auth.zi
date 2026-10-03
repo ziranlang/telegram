@@ -71,6 +71,15 @@ Restore :: (account: *Account, snapshot: string) -> bool {
     user := E.Raw(snapshot, FieldAt(snapshot, 0, "user")); if user != "null" && E.Number(user, 0, "id") > 0 { account.user = E.Copy(user) }
     return true
 }
+// Recover a pending two-factor challenge using the saved authorization key.
+// No phone code or password is stored in the snapshot.
+ResumePassword :: (account: *Account, parameters: string) -> bool {
+    if E.Kind(parameters) != "account.password" { return false }
+    algo := FieldAt(parameters, 0, "current_algo")
+    if E.String(parameters, algo, "@type") != "passwordKdfAlgoSHA256SHA256PBKDF2HMACSHA512iter100000SHA256ModPow" { return false }
+    account.password_parameters = E.Copy(parameters)
+    account.state = "password"; account.error = ""; return true
+}
 Connect :: (account: *Account, api_id: s32, api_hash: string, device: string, snapshot: string = "") -> bool {
     account.client.api_id = api_id; account.client.api_hash = api_hash; account.client.device = device
     dc: s32 = 2; test: bool
@@ -81,6 +90,11 @@ Connect :: (account: *Account, api_id: s32, api_hash: string, device: string, sn
         reply := RPC.Request(*account.client, "{\"@type\":\"users.getUsers\",\"id\":[{\"@type\":\"inputUserSelf\"}]}")
         if E.Kind(reply) != "rpc_error" { account.state = "ready" }
         else if E.String(reply, 0, "error_message") != "AUTH_KEY_UNREGISTERED" && E.String(reply, 0, "error_message") != "SESSION_REVOKED" { account.error = E.String(reply, 0, "error_message"); return false }
+    } else if snapshot != "" {
+        // account.getPassword is available before user authorization. A key
+        // which already accepted a code can resume its password challenge
+        // after a host restart without requesting another phone code.
+        unused ResumePassword(account, Request(account, "{\"@type\":\"account.getPassword\"}"))
     }; return true
 }
 Request :: (account: *Account, query: string) -> string {
