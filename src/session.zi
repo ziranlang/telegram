@@ -97,7 +97,9 @@ Save :: () -> bool {
 Reply :: (value: string, extra: string) {
     if extra == "" { Push(value); return }; out: Vec(u8); BuilderPrint(*out, "%,\"@extra\":%}", value[:value.count - 1], E.Quote(extra)); Push(BuilderFinish(out))
 }
-Error :: (text: string, extra: string) { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"error\",\"code\":400,\"message\":%}", E.Quote(text)); Reply(BuilderFinish(out), extra) }
+// Telegram's own error code is kept (404 ends loadChats, 420 is a flood wait);
+// local and transport failures report 400.
+Error :: (text: string, extra: string, code: s64 = 400) { out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"error\",\"code\":%,\"message\":%}", ifx code > 0 then code else 400, E.Quote(text)); Reply(BuilderFinish(out), extra) }
 Cache :: (reply: string) {
     fields: [2]string = .{"users", "chats"}
     for field: 0..1 {
@@ -563,7 +565,7 @@ Send :: (client: s32, request: string) {
         if !ok { Error(account.error, extra) } else if !Save() { Error("Cannot save the private Telegram account session", extra) } else { Authorization() }; return
     }
     reply := Dispatch(request)
-    if E.Kind(reply) == "rpc_error" { Error(E.String(reply, 0, "error_message"), extra) } else { Reply(reply, extra) }
+    if E.Kind(reply) == "rpc_error" { Error(E.String(reply, 0, "error_message"), extra, E.Number(reply, 0, "error_code")) } else { Reply(reply, extra) }
     if send_success != "" { Push(send_success); send_success = "" }
     unused Save()
 }

@@ -5,12 +5,18 @@ E :: #import "encoding";
 #import "std/text"
 #import "std/json_scan"
 #import "std/byte_text_linux"
+#import "std/binary_linux"
+#import "std/number_text"
 Definition :: struct { name: string; id: u32; fields: string; result: string; }
 definitions: [4096]Definition;
 definition_count: s32;
 initialized: bool;
 Buffer :: struct { bytes: []u8; at: s32; valid: bool; size: s32; }
+// Why the last Decode or DecodeResponse failed, for error messages.
+failure: string;
+Fail :: (buffer: *Buffer, reason: string) { if buffer.valid { failure = E.Copy(reason) }; buffer.valid=false }
 Start :: (bytes: []u8) -> Buffer { result: Buffer; result.bytes=bytes; result.valid=true; return result }
+Join :: (a: string, b: string) -> string { out: Vec(u8); BuilderPrint(*out, "%", a); BuilderPrint(*out, "%", b); return BuilderFinish(out) }
 Find :: (text: string, needle: u8, start: s32) -> s32 { for i: start..cast(s32)text.count-1 { if text[i]==needle { return cast(s32)i } }; return -1 }
 Init :: () -> bool {
     if initialized { return true }; at: s32=0; text:=Schema.Text()
@@ -65,6 +71,7 @@ EncodeType :: (buffer: *Buffer, kind: string, json: string, at: s32, depth: s32)
     if depth>64 || at<0 { buffer.valid=false; return }
     if kind=="int" || kind=="#" { Word(buffer,cast(u32)E.Integer(E.Raw(json,at))); return }
     if kind=="long" { Long(buffer,E.Integer(E.Raw(json,at))); return }
+    if kind=="double" { number:=ReadNumber(json,at); if !number.valid { buffer.valid=false; return }; bits: [8]u8; unused WriteF64LE(bits[:],0,number.value); for i: 0..7 { Byte(buffer,bits[i]) }; return }
     if kind=="true" { return }
     if kind=="Bool" { Word(buffer,ifx E.Raw(json,at)=="true" then cast(u32)0x997275b5 else cast(u32)0xbc799737); return }
     if kind=="string" || kind=="bytes" || kind=="int128" || kind=="int256" { EncodeText(buffer, kind, json, at); return }
@@ -88,21 +95,23 @@ EncodeType :: (buffer: *Buffer, kind: string, json: string, at: s32, depth: s32)
     }
 }
 DecodeType :: (buffer: *Buffer, kind: string, out: *Vec(u8), depth: s32) {
-    if depth>64 || !buffer.valid { buffer.valid=false; return }
+    if !buffer.valid { return }
+    if depth>64 { Fail(buffer, Join("nesting deeper than 64 levels at ", kind)); return }
     if kind=="int" || kind=="#" { BuilderPrint(out,"%",cast(s32)ReadWord(buffer)); return }
     if kind=="long" { BuilderPrint(out,"%",ReadLong(buffer)); return }
+    if kind=="double" { Double(buffer,out); return }
     if kind=="true" { BuilderPrint(out,"true"); return }
     if kind=="string" || kind=="bytes" { start:=ReadBytes(buffer); value:=buffer.bytes[start:start+buffer.size]; if kind=="string" { BuilderPrint(out,"%",E.Quote(TextFromBytes(value))) } else { BuilderPrint(out,"%",E.Quote(E.Base64(value))) }; return }
     if kind=="int128" || kind=="int256" { used: s32=16; if kind=="int256" { used=32 }; if buffer.at+used>buffer.bytes.count { buffer.valid=false; return }; BuilderPrint(out,"%",E.Quote(E.Hex(buffer.bytes[buffer.at:buffer.at+used]))); buffer.at+=used; return }
     angle:=Find(kind,60,0)
     if angle>0 {
-        if kind[:angle]=="Vector" && ReadWord(buffer)!=cast(u32)0x1cb5c415 { buffer.valid=false; return }
-        count:=ReadWord(buffer); if count>cast(u32)65536 { buffer.valid=false; return }; BuilderPrint(out,"[")
+        if kind[:angle]=="Vector" && ReadWord(buffer)!=cast(u32)0x1cb5c415 { Fail(buffer, Join("missing vector header for ", kind)); return }
+        count:=ReadWord(buffer); if count>cast(u32)65536 { Fail(buffer, Join("oversized ", kind)); return }; BuilderPrint(out,"[")
         for i: 0..cast(s32)count-1 { if i>0 { BuilderPrint(out,",") }; DecodeType(buffer,kind[angle+1:cast(s32)kind.count-1],out,depth+1) }; BuilderPrint(out,"]"); return
     }
     id:=ReadWord(buffer)
     if id==cast(u32)0x997275b5 { BuilderPrint(out,"true"); return }; if id==cast(u32)0xbc799737 { BuilderPrint(out,"false"); return }
-    index:=ById(id); if index<0 { buffer.valid=false; return }
+    index:=ById(id); if index<0 { word: [4]u8; for i: 0..3 { word[i]=cast(u8)(id>>cast(u32)((3-i)*8)) }; Fail(buffer, Join("unknown constructor #", Join(E.Hex(word[:]), Join(" for ", kind)))); return }
     BuilderPrint(out,"{\"@type\":%",E.Quote(definitions[index].name)); fields:=definitions[index].fields; cursor: s32; flags: [2]u32
     while cursor<fields.count && buffer.valid {
         field:=ParseField(Next(fields,*cursor)); if field.name=="" { continue }
@@ -111,11 +120,28 @@ DecodeType :: (buffer: *Buffer, kind: string, out: *Vec(u8), depth: s32) {
         BuilderPrint(out,",%:",E.Quote(field.name)); DecodeType(buffer,field.type,out,depth+1)
     }; BuilderPrint(out,"}")
 }
+// A double (video durations, coordinates, ratings) is written with up to nine
+// decimals. JSON has no NaN or infinity, and values too large to round exactly
+// that way are not real Telegram values; both become null.
+Double :: (buffer: *Buffer, out: *Vec(u8)) {
+    if buffer.at+8>buffer.bytes.count { buffer.valid=false; return }
+    value:=ReadF64LE(buffer.bytes,buffer.at); buffer.at+=8
+    if !(value > -9000000000.0 && value < 9000000000.0) { BuilderPrint(out,"null"); return }
+    text: [32]u8; BuilderPrint(out,"%",FormatDecimal(value,9,text[:]))
+}
 Encode :: (json: string, bytes: []u8) -> s32 { if !Init() { return -1 }; buffer:=Start(bytes); EncodeType(*buffer,"Object",json,0,0); if !buffer.valid { return -1 }; return buffer.at }
-Decode :: (bytes: []u8) -> string { if !Init() { return "" }; buffer:=Start(bytes); out: Vec(u8); DecodeType(*buffer,"Object",*out,0); if !buffer.valid || buffer.at!=bytes.count { return "" }; return BuilderFinish(out) }
+Decode :: (bytes: []u8) -> string { if !Init() { failure = "schema unavailable"; return "" }; failure = ""; buffer:=Start(bytes); out: Vec(u8); DecodeType(*buffer,"Object",*out,0); if !Finished(*buffer, "Object") { return "" }; return BuilderFinish(out) }
+// A failed or partly read reply records why in failure.
+Finished :: (buffer: *Buffer, kind: string) -> bool {
+    if buffer.valid && buffer.at==buffer.bytes.count { failure = ""; return true }
+    if failure != "" { return false }
+    if !buffer.valid { failure = Join("response ended inside ", kind) }
+    else { out: Vec(u8); BuilderPrint(*out, "% unread bytes after %", buffer.bytes.count-buffer.at, kind); failure = BuilderFinish(out) }
+    return false
+}
 DecodeResponse :: (method: string, bytes: []u8) -> string {
     if !Init() { return "" }; index:=ByName(method); kind: string="Object"
     if index>=0 && definitions[index].result!="X" { kind=definitions[index].result }
-    buffer:=Start(bytes); out: Vec(u8); DecodeType(*buffer,kind,*out,0)
-    if !buffer.valid || buffer.at!=bytes.count { return "" }; return BuilderFinish(out)
+    failure = ""; buffer:=Start(bytes); out: Vec(u8); DecodeType(*buffer,kind,*out,0)
+    if !Finished(*buffer, kind) { return "" }; return BuilderFinish(out)
 }

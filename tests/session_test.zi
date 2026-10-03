@@ -67,8 +67,7 @@ Main :: () -> s32 {
     if E.Number(deleted,0,"chat_id")!=-1000000000099 || Session.channel_pts[0]!=5 || Session.pts!=12 { failures+=1;print("FAIL independent channel cursor\n") }
     Session.Update("{\"@type\":\"updateShortChatMessage\",\"id\":13,\"chat_id\":42,\"from_id\":66,\"message\":\"Missed event\",\"pts\":15,\"pts_count\":1,\"date\":103}")
     unused Session.Receive(0.0)
-    current: Auth.Account = Session.account
-    if !current.client.gap || Session.pts!=12 { failures+=1;print("FAIL missing sequence triggers recovery without skipping cursor\n") }
+    if !Session.account.client.gap || Session.pts!=12 { failures+=1;print("FAIL missing sequence triggers recovery without skipping cursor\n") }
     Session.Checkpoint();snapshot:=Session.Snapshot();Session.pts=0;Session.peer_count=0;Session.RestoreUpdates(snapshot)
     if Session.pts!=12 || Session.channel_pts[0]!=5 || Session.peer_hashes[0]!=9007199254740993 { failures+=1;print("FAIL durable update cursors and exact peer hash\n") }
     failures+=DialogChecks()
