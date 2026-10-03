@@ -55,7 +55,7 @@ Handle :: (client: *Client,body: []u8,server_id: s64,depth: s32) {
         if kind==cast(u32)0x3072cfa1 { storage := PacketAllocate(1048576,1); if storage == null { client.gap=true; return }; defer { PacketFree(storage) }; bytes := BytesFromPointer(storage,1048576);count:=Unpack(payload,bytes[:]);if count<0 { client.response=Error(-1,"Invalid compressed Telegram response");return };probe:=TL.Start(bytes[:count]);kind=TL.ReadWord(*probe);if kind==cast(u32)0x2144ca19 { client.response=TL.Decode(bytes[:count]) } else { client.response=TL.DecodeResponse(client.method,bytes[:count]) } }
         else if kind==cast(u32)0x2144ca19 { client.response=TL.Decode(payload) }
         else { client.response=TL.DecodeResponse(client.method,payload) }
-        if client.response=="" { client.response=Error(-1,"Invalid Telegram response schema") };return
+        if client.response=="" { client.response=Error(-1,TL.Join("Invalid Telegram response schema: ",TL.failure)) };return
     }
     if constructor==cast(u32)0xedab447b {
         rejected:=TL.ReadLong(*reader);unused TL.ReadWord(*reader);unused TL.ReadWord(*reader);salt:=TL.ReadLong(*reader)

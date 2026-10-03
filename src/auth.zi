@@ -84,7 +84,7 @@ Connect :: (account: *Account, api_id: s32, api_hash: string, device: string, sn
     account.client.api_id = api_id; account.client.api_hash = api_hash; account.client.device = device
     dc: s32 = 2; test: bool
     if snapshot != "" { if !Restore(account, snapshot) { account.error = "Telegram session is unreadable; it was preserved"; return false }; dc = account.client.connection.dc; test = account.client.connection.test }
-    if !RPC.Connect(*account.client, dc, test) { account.error = account.client.connection.error; return false }
+    if !RPC.Connect(*account.client, dc, test) { account.error = E.Copy(account.client.connection.error); return false }
     account.state = "phone"
     if account.user != "" {
         reply := RPC.Request(*account.client, "{\"@type\":\"users.getUsers\",\"id\":[{\"@type\":\"inputUserSelf\"}]}")
