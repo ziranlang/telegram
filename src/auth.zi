@@ -123,7 +123,17 @@ Advance :: (account: *Account, reply: string) -> bool {
 }
 Phone :: (account: *Account, phone: string) -> bool {
     account.phone = E.Copy(phone); out: Vec(u8)
-    BuilderPrint(*out, "{\"@type\":\"auth.sendCode\",\"phone_number\":%,\"api_id\":%,\"api_hash\":%,\"settings\":{\"@type\":\"codeSettings\"}}", E.Quote(phone), account.client.api_id, E.Quote(account.client.api_hash)); return Advance(account, Request(account, BuilderFinish(out)))
+    BuilderPrint(*out, "{\"@type\":\"auth.sendCode\",\"phone_number\":%,\"api_id\":%,\"api_hash\":%,\"settings\":{\"@type\":\"codeSettings\"}}", E.Quote(phone), account.client.api_id, E.Quote(account.client.api_hash))
+    query := BuilderFinish(out); reply := Request(account, query)
+    if E.String(reply, 0, "error_message") == "AUTH_RESTART" {
+        // This authorization key already accepted a login code and awaits the
+        // two-step password, for example after the host restarted. Resume
+        // there; otherwise start over with a new code.
+        account.password_parameters = Request(account, "{\"@type\":\"account.getPassword\"}")
+        if E.Kind(account.password_parameters) == "account.password" && E.Raw(account.password_parameters, FieldAt(account.password_parameters, 0, "current_algo")) != "" { account.state = "password"; account.error = ""; return true }
+        reply = Request(account, query)
+    }
+    return Advance(account, reply)
 }
 Code :: (account: *Account, code: string) -> bool {
     out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"auth.signIn\",\"phone_number\":%,\"phone_code_hash\":%,\"phone_code\":%}", E.Quote(account.phone), E.Quote(account.code_hash), E.Quote(code)); return Advance(account, Request(account, BuilderFinish(out)))
