@@ -413,16 +413,26 @@ Pending :: (chat: s64, id: s64) -> string {
     sent: Vec(u8); BuilderPrint(*sent, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"sending_state\":{\"@type\":\"messageSendingStatePending\"}}", id, chat); pending := BuilderFinish(sent)
     succeeded: Vec(u8); BuilderPrint(*succeeded, "{\"@type\":\"updateMessageSendSucceeded\",\"old_message_id\":%,\"message\":{\"id\":%,\"chat_id\":%}}", id, id, chat); send_success = BuilderFinish(succeeded); return pending
 }
+// Uploaded voice notes carry Telegram's audio/voice attribute instead of
+// arriving as a downloadable document. Photo and document behavior stays.
+Media :: (content: string, file: string, name: string) -> string {
+    kind := E.String(content, 0, "@type"); media: Vec(u8)
+    if kind == "inputMessagePhoto" { BuilderPrint(*media, "{\"@type\":\"inputMediaUploadedPhoto\",\"file\":%}", file) }
+    else {
+        mime := E.String(content, 0, "mime_type"); if mime == "" { mime = "application/octet-stream" }
+        BuilderPrint(*media, "{\"@type\":\"inputMediaUploadedDocument\",\"file\":%,\"mime_type\":%,\"attributes\":[{\"@type\":\"documentAttributeFilename\",\"file_name\":%}", file, E.Quote(mime), E.Quote(name))
+        if kind == "inputMessageVoiceNote" { BuilderPrint(*media, ",{\"@type\":\"documentAttributeAudio\",\"voice\":true,\"duration\":%}", E.Number(content, 0, "duration")) }
+        BuilderPrint(*media, "]}")
+    }; return BuilderFinish(media)
+}
 // A photo or document from a local path, with an optional caption.
 SendMedia :: (request: string, chat: s64, peer: string) -> string {
     content := FieldAt(request, 0, "input_message_content"); kind := E.String(request, content, "@type"); path := E.String(request, content, "path")
     name := E.String(request, content, "file_name"); if name == "" { start: s32 = 0; for i: 0..cast(s32)path.count - 1 { if path[i] == cast(u8)47 { start = i + 1 } }; name = path[start:] }
     file := Upload(path, name); if file == "" { return RPC.Error(-1, upload_error) }
-    media: Vec(u8)
-    if kind == "inputMessagePhoto" { BuilderPrint(*media, "{\"@type\":\"inputMediaUploadedPhoto\",\"file\":%}", file) }
-    else { mime := E.String(request, content, "mime_type"); if mime == "" { mime = "application/octet-stream" }; BuilderPrint(*media, "{\"@type\":\"inputMediaUploadedDocument\",\"file\":%,\"mime_type\":%,\"attributes\":[{\"@type\":\"documentAttributeFilename\",\"file_name\":%}]}", file, E.Quote(mime), E.Quote(name)) }
+    media := Media(E.Raw(request, content), file, name)
     random: [8]u8; if !Random.FillSecure(random[:]) { return RPC.Error(-1, "Secure randomness unavailable") }
-    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"messages.sendMedia\",\"peer\":%,\"media\":%,\"message\":%,\"random_id\":%}", Join(peer, ReplyTo(request)), BuilderFinish(media), E.Quote(E.String(request, FieldAt(request, content, "caption"), "text")), MT.Integer(random[:]))
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"messages.sendMedia\",\"peer\":%,\"media\":%,\"message\":%,\"random_id\":%}", Join(peer, ReplyTo(request)), media, E.Quote(E.String(request, FieldAt(request, content, "caption"), "text")), MT.Integer(random[:]))
     reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; return Pending(chat, SentId(reply))
 }
 // Forwards messages of one chat to another as the account.
@@ -514,7 +524,7 @@ Dispatch :: (request: string) -> string {
     }
     if kind == "sendMessage" {
         content_kind := E.String(request, FieldAt(request, 0, "input_message_content"), "@type")
-        if content_kind == "inputMessagePhoto" || content_kind == "inputMessageDocument" { return SendMedia(request, chat, peer) }
+        if content_kind == "inputMessagePhoto" || content_kind == "inputMessageDocument" || content_kind == "inputMessageVoiceNote" { return SendMedia(request, chat, peer) }
         out: Vec(u8)
         random: [8]u8; if !Random.FillSecure(random[:]) { return RPC.Error(-1, "Secure randomness unavailable") }
         text := E.String(request, FieldAt(request, FieldAt(request, 0, "input_message_content"), "text"), "text")

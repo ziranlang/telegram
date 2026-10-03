@@ -1,6 +1,7 @@
 Session :: #import "session";
 E :: #import "encoding";
 Auth :: #import "auth";
+TL :: #import "tl";
 Time :: #import "std/timer_linux";
 c :: #system_library "libc";
 ClockProbe :: (clock: s32, value: *Time.ClockValue) -> s32 #foreign c "clock_gettime";
@@ -72,5 +73,13 @@ Main :: () -> s32 {
     if Session.pts!=12 || Session.channel_pts[0]!=5 || Session.peer_hashes[0]!=9007199254740993 { failures+=1;print("FAIL durable update cursors and exact peer hash\n") }
     failures+=DialogChecks()
     failures+=MediaChecks()
+    file := "{\"@type\":\"inputFile\",\"id\":5,\"parts\":1,\"name\":\"voice.ogg\",\"md5_checksum\":\"\"}"
+    media := Session.Media("{\"@type\":\"inputMessageVoiceNote\",\"mime_type\":\"audio/ogg\",\"duration\":3}",file,"voice.ogg")
+    rows := FieldAt(media,0,"attributes"); audio := E.Raw(media,ElementAt(media,rows,1))
+    if E.Kind(media)!="inputMediaUploadedDocument" || E.Kind(audio)!="documentAttributeAudio" || E.Raw(audio,FieldAt(audio,0,"voice"))!="true" || E.Number(audio,0,"duration")!=3 { failures+=1;print("FAIL voice-note media attribute\n") }
+    encoded: [4096]u8
+    if TL.Encode(media,encoded[:]) <= 0 { failures+=1;print("FAIL voice-note media schema serialization\n") }
+    document := Session.Media("{\"@type\":\"inputMessageDocument\"}",file,"voice.ogg")
+    if ArrayCount(document,FieldAt(document,0,"attributes"))!=1 { failures+=1;print("FAIL ordinary document has no voice attribute\n") }
     print("Telegram update sessions: % failures\n",failures);return failures
 }
