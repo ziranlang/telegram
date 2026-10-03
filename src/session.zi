@@ -6,6 +6,7 @@ MT :: #import "mtproto";
 E :: #import "encoding";
 Messages :: #import "messages";
 Random :: #import "std/random_linux";
+Time :: #import "std/timer_linux";
 Hash :: #import "crypto/sha256";
 #import "std/text"
 #import "std/json_scan"
@@ -567,6 +568,15 @@ Send :: (client: s32, request: string) {
     unused Save()
 }
 Receive :: (timeout: float64) -> string {
+    // With no queued event, waiting for sign-in must honor the same timeout
+    // as receiving updates. Returning immediately here makes native clients
+    // busy-loop while the owner enters a phone number, code or password.
+    if head == tail && account.state != "ready" && timeout > 0.0 {
+        seconds := timeout; if seconds > 86400.0 { seconds = 86400.0 }
+        milliseconds := cast(s64)(seconds * 1000.0)
+        if milliseconds < 1 { milliseconds = 1 }
+        unused Time.SleepMilliseconds(milliseconds)
+    }
     // Before sign-in nothing arrives unasked; wait instead of spinning while
     // the owner reads a login code.
     if head == tail && account.state != "ready" && timeout > 0.0 { unused SleepMilliseconds(cast(s64)(timeout * 1000.0)) }

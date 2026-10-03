@@ -1,6 +1,9 @@
 Session :: #import "session";
 E :: #import "encoding";
 Auth :: #import "auth";
+Time :: #import "std/timer_linux";
+c :: #system_library "libc";
+ClockProbe :: (clock: s32, value: *Time.ClockValue) -> s32 #foreign c "clock_gettime";
 #import "std/json_scan"
 DialogChecks :: () -> s32 {
     failures: s32
@@ -27,8 +30,26 @@ MediaChecks :: () -> s32 {
     if E.String(best,0,"type")!="y" || E.Number(best,0,"size")!=81234 { failures+=1;print("FAIL largest photo size\n") }
     return failures
 }
-Main :: () -> s32 {
+LoginWaitChecks :: () -> s32 {
     failures: s32
+    Session.head=Session.tail; Session.account.state="password"
+    cpu_before: Time.ClockValue; cpu_after: Time.ClockValue
+    unused ClockProbe(2,*cpu_before)
+    before:=Time.MonotonicMilliseconds(); empty:=Session.Receive(0.05)
+    elapsed:=Time.MonotonicMilliseconds()-before
+    unused ClockProbe(2,*cpu_after)
+    cpu_ms:=(cpu_after.seconds-cpu_before.seconds)*1000+(cpu_after.nanoseconds-cpu_before.nanoseconds)/1000000
+    if empty!="" || elapsed<45 || cpu_ms>10 { failures+=1;print("FAIL sign-in receive waits without spinning: wall % ms, CPU % ms\n",elapsed,cpu_ms) }
+    Session.Push("queued login event");before=Time.MonotonicMilliseconds()
+    queued:=Session.Receive(0.5);elapsed=Time.MonotonicMilliseconds()-before
+    if queued!="queued login event" || elapsed>=400 { failures+=1;print("FAIL queued sign-in event is delivered immediately\n") }
+    before=Time.MonotonicMilliseconds();unused Session.Receive(0.0);unused Session.Receive(-1.0)
+    if Time.MonotonicMilliseconds()-before>=400 { failures+=1;print("FAIL nonblocking sign-in receive\n") }
+    print("Telegram sign-in idle receive: wall % ms, CPU % ms\n",50,cpu_ms)
+    Session.account.state="";return failures
+}
+Main :: () -> s32 {
+    failures: s32 = LoginWaitChecks()
     Session.pts=10;Session.date=100
     Session.Update("{\"@type\":\"updateShortMessage\",\"id\":12,\"user_id\":66,\"message\":\"Hello 🙂\",\"pts\":11,\"pts_count\":1,\"date\":101}")
     first:=Session.Receive(0.0);message:=E.Raw(first,FieldAt(first,0,"message"))
