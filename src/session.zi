@@ -11,6 +11,7 @@ Hash :: #import "crypto/sha256";
 #import "std/json_scan"
 #import "std/c_string"
 #import "std/byte_text_linux"
+#import "std/timer_linux"
 c :: #system_library "libc";
 SessionOpenRaw :: (path: *u8, flags: s32, mode: s32) -> s32 #foreign c "open";
 SessionOpenAtRaw :: (fd: s32,path: *u8,flags: s32,mode: s32) -> s32 #foreign c "openat";
@@ -566,6 +567,9 @@ Send :: (client: s32, request: string) {
     unused Save()
 }
 Receive :: (timeout: float64) -> string {
+    // Before sign-in nothing arrives unasked; wait instead of spinning while
+    // the owner reads a login code.
+    if head == tail && account.state != "ready" && timeout > 0.0 { unused SleepMilliseconds(cast(s64)(timeout * 1000.0)) }
     if head == tail && account.state == "ready" {
         // Only checkpoint after callers have drained and applied the queue.
         // A crash before then safely replays updates from the previous cursor.
