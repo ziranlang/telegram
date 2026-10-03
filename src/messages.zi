@@ -53,6 +53,11 @@ Normalize :: (message: string, chat: s64, self: s64 = 0) -> string {
         else if media_kind=="messageMediaPoll" { BuilderPrint(*out,"{\"@type\":\"messagePoll\",\"poll\":{\"question\":{\"text\":%}}}",E.Quote(E.String(message,FieldAt(message,FieldAt(message,media,"poll"),"question"),"text"))) }
         else { BuilderPrint(*out, "{\"@type\":\"messageText\",\"text\":{\"@type\":\"formattedText\",\"text\":%}}", E.Quote(text)) }
     }
+    // Replies name the message they answer; forwards name their origin.
+    reply := FieldAt(message, 0, "reply_to")
+    if E.String(message, reply, "@type") == "messageReplyHeader" && E.Number(message, reply, "reply_to_msg_id") > 0 { BuilderPrint(*out, ",\"reply_to_message_id\":%", E.Number(message, reply, "reply_to_msg_id")) }
+    forward := FieldAt(message, 0, "fwd_from")
+    if E.String(message, forward, "@type") == "messageFwdHeader" { BuilderPrint(*out, ",\"forward_info\":{\"from_id\":%,\"from_name\":%}", ChatId(E.Raw(message, FieldAt(message, forward, "from_id"))), E.Quote(E.String(message, forward, "from_name"))) }
     markup := FieldAt(message, 0, "reply_markup")
     if E.String(message, markup, "@type") == "replyInlineMarkup" {
         BuilderPrint(*out, ",\"reply_markup\":{\"@type\":\"replyMarkupInlineKeyboard\",\"rows\":["); rows := FieldAt(message, markup, "rows"); comma := ""
