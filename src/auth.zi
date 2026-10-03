@@ -85,7 +85,12 @@ Connect :: (account: *Account, api_id: s32, api_hash: string, device: string, sn
 }
 Request :: (account: *Account, query: string) -> string {
     for attempt: 0..3 {
+        // Telegram closes idle connections, for example while the owner is
+        // reading a login code. Reopen with the same authorization key; a
+        // repeated request keeps its random_id, so it cannot apply twice.
+        if account.client.connection.error != "" && !RPC.Connect(*account.client, account.client.connection.dc, account.client.connection.test) { return RPC.Error(-1, account.client.connection.error) }
         reply := RPC.Request(*account.client, query); message := E.String(reply, 0, "error_message"); dc: s32
+        if E.Kind(reply) == "rpc_error" && account.client.connection.error != "" && attempt < 3 { account.client.gap = true; continue }
         prefixes: [3]string = .{"PHONE_MIGRATE_", "NETWORK_MIGRATE_", "USER_MIGRATE_"}
         for i: 0..2 { p := prefixes[i]; if message.count > p.count && message[:p.count] == p { dc = cast(s32)E.Integer(message[p.count:]) } }
         if dc == 0 || dc == account.client.connection.dc { return reply }
