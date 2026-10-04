@@ -6,6 +6,7 @@ Time :: #import "std/timer_linux";
 c :: #system_library "libc";
 ClockProbe :: (clock: s32, value: *Time.ClockValue) -> s32 #foreign c "clock_gettime";
 #import "std/json_scan"
+#import "std/text"
 DialogChecks :: () -> s32 {
     failures: s32
     // Every dialog becomes a chat with a person's full name, its newest
@@ -49,6 +50,17 @@ LoginWaitChecks :: () -> s32 {
     print("Telegram sign-in idle receive: wall % ms, CPU % ms\n",50,cpu_ms)
     Session.account.state="";return failures
 }
+CallChecks :: () -> s32 {
+    failures: s32; Session.head=Session.tail; before := Session.pts
+    updates: [5]string = .{"{\"@type\":\"updatePhoneCall\",\"phone_call\":{\"@type\":\"phoneCallRequested\",\"id\":9007199254740993}}","{\"@type\":\"updatePhoneCallSignalingData\",\"phone_call_id\":9007199254740993,\"data\":\"AAE=\"}","{\"@type\":\"updateGroupCall\",\"call\":{\"@type\":\"groupCallDiscarded\",\"id\":12}}","{\"@type\":\"updateGroupCallConnection\",\"params\":{\"@type\":\"dataJSON\",\"data\":\"{}\"}}","{\"@type\":\"updateGroupCallParticipants\",\"call\":{\"@type\":\"inputGroupCall\",\"id\":12,\"access_hash\":34},\"participants\":[],\"version\":2}"}
+    for i: 0..cast(s32)4 { Session.Update(updates[i]); if Session.Receive(0.0) != updates[i] { failures+=1;print("FAIL call update delivery %\n",i) } }
+    if Session.pts != before { failures+=1;print("FAIL calls do not advance message sequence\n") }
+    protocol := "{\"@type\":\"phoneCallProtocol\",\"udp_p2p\":true,\"udp_reflector\":true,\"min_layer\":65,\"max_layer\":92,\"library_versions\":[\"13.0.0\"]}"
+    call: Vec(u8); BuilderPrint(*call,"{\"@type\":\"phone.requestCall\",\"user_id\":{\"@type\":\"inputUser\",\"user_id\":123,\"access_hash\":456},\"random_id\":789,\"g_a_hash\":\"AAE=\",\"protocol\":%}",protocol)
+    bytes: [4096]u8; if TL.Encode(BuilderFinish(call),bytes[:]) <= 0 { failures+=1;print("FAIL private call serialization\n") }
+    if TL.Encode("{\"@type\":\"phone.joinGroupCall\",\"call\":{\"@type\":\"inputGroupCall\",\"id\":12,\"access_hash\":34},\"join_as\":{\"@type\":\"inputPeerSelf\"},\"params\":{\"@type\":\"dataJSON\",\"data\":\"{}\"}}",bytes[:]) <= 0 { failures+=1;print("FAIL group call serialization\n") }
+    return failures
+}
 Main :: () -> s32 {
     failures: s32 = LoginWaitChecks()
     Session.pts=10;Session.date=100
@@ -73,6 +85,7 @@ Main :: () -> s32 {
     if Session.pts!=12 || Session.channel_pts[0]!=5 || Session.peer_hashes[0]!=9007199254740993 { failures+=1;print("FAIL durable update cursors and exact peer hash\n") }
     failures+=DialogChecks()
     failures+=MediaChecks()
+    failures+=CallChecks()
     file := "{\"@type\":\"inputFile\",\"id\":5,\"parts\":1,\"name\":\"voice.ogg\",\"md5_checksum\":\"\"}"
     media := Session.Media("{\"@type\":\"inputMessageVoiceNote\",\"mime_type\":\"audio/ogg\",\"duration\":3}",file,"voice.ogg")
     rows := FieldAt(media,0,"attributes"); audio := E.Raw(media,ElementAt(media,rows,1))
