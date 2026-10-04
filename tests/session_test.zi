@@ -65,6 +65,10 @@ Main :: () -> s32 {
     failures: s32 = LoginWaitChecks()
     query := Session.GroupQuery("{\"title\":\"Errors\",\"description\":\"Command and task failures\"}")
     group_encoded: [4096]u8
+    send := Session.TextQuery("{\"random_id\":9007199254740993,\"input_message_content\":{\"text\":{\"text\":\"Errors summary\"}}}", "{\"@type\":\"inputPeerSelf\"}")
+    if E.Number(send, 0, "random_id") != 9007199254740993 || TL.Encode(send, group_encoded[:]) <= 0 { failures += 1; print("FAIL durable message identity serialization\n") }
+    first_send := Session.TextQuery("{}", "{\"@type\":\"inputPeerSelf\"}"); second_send := Session.TextQuery("{}", "{\"@type\":\"inputPeerSelf\"}")
+    if E.Number(first_send, 0, "random_id") == 0 || E.Number(first_send, 0, "random_id") == E.Number(second_send, 0, "random_id") { failures += 1; print("FAIL fresh identities for ordinary messages\n") }
     if E.Kind(query) != "channels.createChannel" || E.Raw(query, FieldAt(query, 0, "megagroup")) != "true" || TL.Encode(query, group_encoded[:]) <= 0 || Session.GroupQuery("{}") != "" { failures += 1; print("FAIL private group creation serialization\n") }
     created := Session.GroupReply("{\"@type\":\"updates\",\"chats\":[{\"@type\":\"channel\",\"id\":321,\"title\":\"Errors\",\"megagroup\":true,\"creator\":true}]}")
     if E.Number(created, 0, "id") != -1000000000321 || E.Raw(created, FieldAt(created, 0, "is_private")) != "true" || E.Raw(created, FieldAt(created, 0, "is_creator")) != "true" { failures += 1; print("FAIL created private group receipt: %\n", created) }
