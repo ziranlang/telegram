@@ -43,5 +43,8 @@ Main :: () -> s32 {
     for i: 0..4 { if TL.Encode(requests[i],bytes[:])<=0 { print("FAIL encode session request %\n",i); failures+=1 } }
     photo := "{\"@type\":\"upload.getFile\",\"location\":{\"@type\":\"inputPeerPhotoFileLocation\",\"peer\":{\"@type\":\"inputPeerSelf\"},\"photo_id\":5123456789012345678},\"offset\":0,\"limit\":524288}"
     if TL.Encode(photo,bytes[:])<=0 { print("FAIL encode chat photo location\n"); failures+=1 }
+    album_photo := Messages.Normalize("{\"@type\":\"message\",\"id\":73,\"grouped_id\":9007199254740993,\"message\":\"Album caption\",\"media\":{\"@type\":\"messageMediaPhoto\",\"photo\":{\"sizes\":[{\"@type\":\"photoSize\",\"w\":90,\"h\":120},{\"@type\":\"photoSize\",\"w\":960,\"h\":1280}]}}}",66)
+    media := FieldAt(album_photo,0,"content")
+    if E.String(album_photo,0,"media_album_id") != "9007199254740993" || E.String(album_photo,media,"@type") != "messagePhoto" || E.Number(album_photo,media,"width") != 960 || E.Number(album_photo,media,"height") != 1280 || E.String(album_photo,FieldAt(album_photo,media,"caption"),"text") != "Album caption" { failures+=1;print("FAIL photo album identity and dimensions\n") }
     print("Telegram auth and normalization: % failures\n",failures); return failures
 }

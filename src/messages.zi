@@ -17,8 +17,13 @@ Peer :: (chat: s64) -> string {
 Normalize :: (message: string, chat: s64, self: s64 = 0) -> string {
     peer := E.Raw(message, FieldAt(message, 0, "from_id")); sender := ChatId(peer); outgoing := E.Raw(message, FieldAt(message, 0, "out")) == "true"
     if sender==0 { sender=chat;if outgoing && self>0 { sender=self } }
-    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"date\":%,\"is_outgoing\":%,\"sender_id\":{\"@type\":\"%\",\"%\":%},\"content\":", E.Number(message, 0, "id"), chat, E.Number(message, 0, "date"), ifx outgoing then "true" else "false", ifx sender > 0 then "messageSenderUser" else "messageSenderChat", ifx sender > 0 then "user_id" else "chat_id", sender)
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"message\",\"id\":%,\"chat_id\":%,\"date\":%,\"is_outgoing\":%,\"sender_id\":{\"@type\":\"%\",\"%\":%}", E.Number(message, 0, "id"), chat, E.Number(message, 0, "date"), ifx outgoing then "true" else "false", ifx sender > 0 then "messageSenderUser" else "messageSenderChat", ifx sender > 0 then "user_id" else "chat_id", sender)
     kind := E.Kind(message); text := E.String(message, 0, "message")
+    // Album IDs are signed 64-bit Telegram values: keep them as decimal
+    // strings across JSON clients, whose number type may lose precision.
+    album := E.Number(message, 0, "grouped_id")
+    if album != 0 { BuilderPrint(*out, ",\"media_album_id\":\"%\"", album) }
+    BuilderPrint(*out, ",\"content\":")
     if kind == "messageService" {
         action:=FieldAt(message,0,"action");type:=E.String(message,action,"@type");content:="messageService"
         if type=="messageActionChatEditTitle" { content="messageChatChangeTitle" }
@@ -34,7 +39,14 @@ Normalize :: (message: string, chat: s64, self: s64 = 0) -> string {
     }
     else {
         media := FieldAt(message, 0, "media"); media_kind := E.String(message, media, "@type")
-        if media_kind == "messageMediaPhoto" { BuilderPrint(*out, "{\"@type\":\"messagePhoto\",\"caption\":{\"text\":%}}", E.Quote(text)) }
+        if media_kind == "messageMediaPhoto" {
+            photo := FieldAt(message, media, "photo"); sizes := FieldAt(message, photo, "sizes"); width: s64 = 0; height: s64 = 0
+            for i: 0..ArrayCount(message, sizes) - 1 {
+                size := ElementAt(message, sizes, i); w := E.Number(message, size, "w"); h := E.Number(message, size, "h")
+                if w > 0 && h > 0 && w <= 32768 && h <= 32768 && w * h > width * height { width = w; height = h }
+            }
+            BuilderPrint(*out, "{\"@type\":\"messagePhoto\",\"width\":%,\"height\":%,\"caption\":{\"text\":%}}", width, height, E.Quote(text))
+        }
         else if media_kind == "messageMediaDocument" {
             document := FieldAt(message, media, "document"); attributes := FieldAt(message, document, "attributes"); name := "Attachment"; content := "messageDocument";title:="";emoji:=""
             for i: 0..ArrayCount(message, attributes) - 1 {
