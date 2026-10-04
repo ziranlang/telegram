@@ -149,6 +149,11 @@ Advance :: (update: string,chat: s64) -> bool {
     return true
 }
 Update :: (update: string) {
+    // Call signaling is delivered verbatim to the account application's media
+    // engine. It has no message sequence counter and must not be dropped.
+    call_kind := E.Kind(update)
+    if call_kind == "updatePhoneCall" || call_kind == "updatePhoneCallSignalingData" || call_kind == "updateGroupCall" || call_kind == "updateGroupCallConnection" || call_kind == "updateGroupCallParticipants" { Push(E.Copy(update)); return }
+
     kind := E.Kind(update)
     if kind == "updates" || kind == "updatesCombined" {
         Cache(update); incoming:=E.Number(update,0,"seq"); first:=incoming;if kind=="updatesCombined" { first=E.Number(update,0,"seq_start") }
@@ -490,6 +495,32 @@ SearchChats :: (request: string) -> string {
 }
 Dispatch :: (request: string) -> string {
     kind := E.Kind(request); chat := E.Number(request, 0, "chat_id"); message := E.Number(request, 0, "message_id"); peer := InputPeer(chat)
+    if kind == "callRpc" {
+        query := E.Raw(request,FieldAt(request,0,"query")); method := E.Kind(query)
+        if method == "getActiveGroupCall" {
+            full: Vec(u8)
+            if chat <= -1000000000000 { BuilderPrint(*full,"{\"@type\":\"channels.getFullChannel\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%}}",-1000000000000-chat,E.Number(peer,0,"access_hash")) }
+            else if chat < 0 { BuilderPrint(*full,"{\"@type\":\"messages.getFullChat\",\"chat_id\":%}",-chat) }
+            else { return RPC.Error(400,"Choose a Telegram group") }
+            reply := Request(BuilderFinish(full)); if E.Kind(reply) == "rpc_error" { return reply }
+            active := E.Raw(reply,FieldAt(reply,FieldAt(reply,0,"full_chat"),"call"))
+            result: Vec(u8); BuilderPrint(*result,"{\"@type\":\"activeGroupCall\",\"call\":%}",ifx active == "" then "null" else active); return BuilderFinish(result)
+        }
+        if method == "messages.getDhConfig" || (method.count > 6 && method[:6] == "phone.") {
+            // Resolve chat peers inside the sole authenticated account session;
+            // callers never supply or persist the account's access hashes.
+            if method == "phone.requestCall" {
+                user: Vec(u8); BuilderPrint(*user,"{\"@type\":\"inputUser\",\"user_id\":%,\"access_hash\":%}",chat,E.Number(peer,0,"access_hash"))
+                patched: Vec(u8); BuilderPrint(*patched,"{\"user_id\":%,%",BuilderFinish(user),query[1:]); query = BuilderFinish(patched)
+            }
+            if method == "phone.createGroupCall" {
+                patched: Vec(u8); BuilderPrint(*patched,"{\"peer\":%,%",peer,query[1:]); query = BuilderFinish(patched)
+            }
+            result := Request(query)
+            updates := FieldAt(result,0,"updates"); for i: 0..ArrayCount(result,updates) - 1 { Update(E.Raw(result,ElementAt(result,updates,i))) }
+            return result
+        }; return RPC.Error(400,"Unsupported call request")
+    }
     if kind == "getMe" { return account.user }
     if kind == "downloadMessageFile" { return Download(request) }
     if kind == "downloadChatPhoto" { return ChatPhoto(request) }
