@@ -502,6 +502,19 @@ GroupQuery :: (request: string) -> string {
     BuilderPrint(*out, "{\"@type\":\"channels.createChannel\",\"megagroup\":true,\"title\":%,\"about\":%}", E.Quote(title), E.Quote(E.String(request, 0, "description")))
     return BuilderFinish(out)
 }
+// A durable outbox can retain Telegram's deduplication identity across restarts.
+// Other callers retain a fresh cryptographically random message identity.
+TextQuery :: (request: string, peer: string) -> string {
+    identity := E.Number(request, 0, "random_id")
+    if identity == 0 {
+        random: [8]u8; if !Random.FillSecure(random[:]) { return RPC.Error(-1, "Secure randomness unavailable") }
+        identity = MT.Integer(random[:])
+    }
+    text := E.String(request, FieldAt(request, FieldAt(request, 0, "input_message_content"), "text"), "text")
+    out: Vec(u8)
+    BuilderPrint(*out, "{\"@type\":\"messages.sendMessage\",\"peer\":%,\"message\":%,\"random_id\":%}", Join(peer, ReplyTo(request)), E.Quote(text), identity)
+    return BuilderFinish(out)
+}
 GroupReply :: (reply: string, selected: s64 = 0) -> string {
     if E.Kind(reply) == "rpc_error" { return reply }
     rows := FieldAt(reply, 0, "chats")
@@ -594,11 +607,8 @@ Dispatch :: (request: string) -> string {
     if kind == "sendMessage" {
         content_kind := E.String(request, FieldAt(request, 0, "input_message_content"), "@type")
         if content_kind == "inputMessagePhoto" || content_kind == "inputMessageDocument" || content_kind == "inputMessageVoiceNote" { return SendMedia(request, chat, peer) }
-        out: Vec(u8)
-        random: [8]u8; if !Random.FillSecure(random[:]) { return RPC.Error(-1, "Secure randomness unavailable") }
-        text := E.String(request, FieldAt(request, FieldAt(request, 0, "input_message_content"), "text"), "text")
-        BuilderPrint(*out, "{\"@type\":\"messages.sendMessage\",\"peer\":%,\"message\":%,\"random_id\":%}", Join(peer, ReplyTo(request)), E.Quote(text), MT.Integer(random[:]))
-        reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; return Pending(chat, SentId(reply))
+        query := TextQuery(request, peer); if E.Kind(query) == "rpc_error" { return query }
+        reply := Request(query); if E.Kind(reply) == "rpc_error" { return reply }; return Pending(chat, SentId(reply))
     }
     if kind == "getCallbackQueryAnswer" {
         out: Vec(u8)
