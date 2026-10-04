@@ -63,6 +63,13 @@ CallChecks :: () -> s32 {
 }
 Main :: () -> s32 {
     failures: s32 = LoginWaitChecks()
+    query := Session.GroupQuery("{\"title\":\"Errors\",\"description\":\"Command and task failures\"}")
+    group_encoded: [4096]u8
+    if E.Kind(query) != "channels.createChannel" || E.Raw(query, FieldAt(query, 0, "megagroup")) != "true" || TL.Encode(query, group_encoded[:]) <= 0 || Session.GroupQuery("{}") != "" { failures += 1; print("FAIL private group creation serialization\n") }
+    created := Session.GroupReply("{\"@type\":\"updates\",\"chats\":[{\"@type\":\"channel\",\"id\":321,\"title\":\"Errors\",\"megagroup\":true,\"creator\":true}]}")
+    if E.Number(created, 0, "id") != -1000000000321 || E.Raw(created, FieldAt(created, 0, "is_private")) != "true" || E.Raw(created, FieldAt(created, 0, "is_creator")) != "true" { failures += 1; print("FAIL created private group receipt: %\n", created) }
+    public := Session.GroupReply("{\"chats\":[{\"@type\":\"channel\",\"id\":321,\"username\":\"public_errors\",\"megagroup\":true}]}")
+    if E.Raw(public, FieldAt(public, 0, "is_private")) != "false" || E.Kind(Session.GroupReply("{\"@type\":\"rpc_error\",\"error_code\":420}")) != "rpc_error" { failures += 1; print("FAIL group privacy and RPC failures\n") }
     Session.pts=10;Session.date=100
     Session.Update("{\"@type\":\"updateShortMessage\",\"id\":12,\"user_id\":66,\"message\":\"Hello 🙂\",\"pts\":11,\"pts_count\":1,\"date\":101}")
     first:=Session.Receive(0.0);message:=E.Raw(first,FieldAt(first,0,"message"))

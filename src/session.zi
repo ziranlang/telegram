@@ -493,6 +493,32 @@ SearchChats :: (request: string) -> string {
     reply := Request(BuilderFinish(search)); if E.Kind(reply) != "rpc_error" { Found(*out, reply, *comma) } else if comma == "" { return reply }
     BuilderPrint(*out, "]}"); return BuilderFinish(out)
 }
+// Private groups may start with just their creator. Keep access hashes inside
+// the account transport, as with every other chat operation.
+GroupQuery :: (request: string) -> string {
+    title := E.String(request, 0, "title")
+    if title == "" || title.count > 128 { return "" }
+    out: Vec(u8)
+    BuilderPrint(*out, "{\"@type\":\"channels.createChannel\",\"megagroup\":true,\"title\":%,\"about\":%}", E.Quote(title), E.Quote(E.String(request, 0, "description")))
+    return BuilderFinish(out)
+}
+GroupReply :: (reply: string, selected: s64 = 0) -> string {
+    if E.Kind(reply) == "rpc_error" { return reply }
+    rows := FieldAt(reply, 0, "chats")
+    for i: 0..ArrayCount(reply, rows) - 1 {
+        at := ElementAt(reply, rows, i); kind := E.String(reply, at, "@type")
+        if kind != "chat" && kind != "channel" { continue }
+        id := -E.Number(reply, at, "id")
+        if kind == "channel" { id -= 1000000000000 }
+        if selected != 0 && selected != id { continue }
+        private := E.String(reply, at, "username") == "" && ArrayCount(reply, FieldAt(reply, at, "usernames")) <= 0
+        group := kind == "chat" || E.Raw(reply, FieldAt(reply, at, "megagroup")) == "true"
+        out: Vec(u8)
+        BuilderPrint(*out, "{\"@type\":\"chat\",\"id\":%,\"title\":%,\"is_private\":%,\"is_creator\":%,\"is_group\":%}", id, E.Quote(E.String(reply, at, "title")), ifx private then "true" else "false", ifx E.Raw(reply, FieldAt(reply, at, "creator")) == "true" then "true" else "false", ifx group then "true" else "false")
+        return BuilderFinish(out)
+    }
+    return RPC.Error(404, "Telegram group is absent")
+}
 Dispatch :: (request: string) -> string {
     kind := E.Kind(request); chat := E.Number(request, 0, "chat_id"); message := E.Number(request, 0, "message_id"); peer := InputPeer(chat)
     if kind == "callRpc" {
@@ -522,6 +548,18 @@ Dispatch :: (request: string) -> string {
         }; return RPC.Error(400,"Unsupported call request")
     }
     if kind == "getMe" { return account.user }
+    if kind == "createNewSupergroupChat" {
+        query := GroupQuery(request); if query == "" { return RPC.Error(400, "A group title is required") }
+        reply := Request(query)
+        rows := FieldAt(reply, 0, "updates"); for i: 0..ArrayCount(reply, rows) - 1 { Update(E.Raw(reply, ElementAt(reply, rows, i))) }
+        return GroupReply(reply)
+    }
+    if kind == "getChat" && chat < 0 {
+        out: Vec(u8)
+        if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"channels.getFullChannel\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%}}", -1000000000000 - chat, E.Number(peer, 0, "access_hash")) }
+        else { BuilderPrint(*out, "{\"@type\":\"messages.getFullChat\",\"chat_id\":%}", -chat) }
+        return GroupReply(Request(BuilderFinish(out)), chat)
+    }
     if kind == "downloadMessageFile" { return Download(request) }
     if kind == "downloadChatPhoto" { return ChatPhoto(request) }
     if kind == "searchChats" { return SearchChats(request) }
