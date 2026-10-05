@@ -6,7 +6,8 @@ entropy and private file operations use operating-system bindings. It does not
 load TDLib, run a Python bridge, or depend on a Telegram C/C++ implementation.
 
 Exports are package-qualified: `telegram/tl`, `telegram/mtproto`,
-`telegram/client`, `telegram/auth`, `telegram/messages` and `telegram/session`.
+`telegram/client`, `telegram/auth`, `telegram/messages`, `telegram/members` and
+`telegram/session`.
 Use `ziran add https://github.com/ziranlang/telegram.git` once this repository
 is published. For development, resolve the canonical checkout through an
 ignored `ziran.local.toml` override and commit the generated lock file.
@@ -45,6 +46,12 @@ the file's data center when it differs from the account's;
 (`inputMessagePhoto` / `inputMessageDocument` with a `path`), optionally as a
 reply. `forwardMessages` forwards messages between chats and `searchChats`
 finds people, bots, groups and channels by name, @username or +phone.
+`getChat` reports a group's member count and description. `searchChatMembers`
+lists a group's recent members (up to 200) with their roles, custom titles
+and users; `getUser` gives one user's presence, bot message access, active
+username and profile photo; `getChatMessageCount` counts a chat's photos,
+videos, files, audio, links, voice messages or GIFs with TDLib's search
+filters.
 Normalized messages carry `reply_to_message_id` and `forward_info`. Other API
 methods can be called through `client` and the bundled TL schema. Secret
 chats, account registration and interactive email enrollment do not have

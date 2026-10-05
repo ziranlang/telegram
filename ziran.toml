@@ -13,6 +13,7 @@ mtproto = "src/mtproto.zi"
 client = "src/client.zi"
 auth = "src/auth.zi"
 messages = "src/messages.zi"
+members = "src/members.zi"
 session = "src/session.zi"
 
 [dependencies.crypto]

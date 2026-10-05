@@ -1,0 +1,81 @@
+// Normalize chat members, user presence and shared-media counts into the
+// TDLib-style objects the session returns.
+E :: #import "encoding";
+Messages :: #import "messages";
+#import "std/json_scan"
+#import "std/text"
+
+Flag :: (json: string, at: s32, name: string) -> bool { return E.Raw(json, FieldAt(json, at, name)) == "true" }
+Bool :: (value: bool) -> string { return ifx value then "true" else "false" }
+
+// A user's presence, bot access and active username. Photo IDs are 64-bit,
+// so they travel as text like chat photo IDs do.
+User :: (json: string, at: s32) -> string {
+    username := E.String(json, at, "username")
+    if username == "" {
+        names := FieldAt(json, at, "usernames")
+        for i: 0..ArrayCount(json, names) - 1 {
+            item := ElementAt(json, names, i)
+            if Flag(json, item, "active") { username = E.String(json, item, "username"); break }
+        }
+    }
+    status := FieldAt(json, at, "status"); kind := E.String(json, status, "@type"); presence: Vec(u8)
+    if kind == "userStatusOnline" { BuilderPrint(*presence, "{\"@type\":\"userStatusOnline\",\"expires\":%}", E.Number(json, status, "expires")) }
+    else if kind == "userStatusOffline" { BuilderPrint(*presence, "{\"@type\":\"userStatusOffline\",\"was_online\":%}", E.Number(json, status, "was_online")) }
+    else if kind == "userStatusRecently" || kind == "userStatusLastWeek" || kind == "userStatusLastMonth" { BuilderPrint(*presence, "{\"@type\":%}", E.Quote(kind)) }
+    else { BuilderPrint(*presence, "{\"@type\":\"userStatusEmpty\"}") }
+    type: Vec(u8)
+    if Flag(json, at, "deleted") { BuilderPrint(*type, "{\"@type\":\"userTypeDeleted\"}") }
+    else if Flag(json, at, "bot") { BuilderPrint(*type, "{\"@type\":\"userTypeBot\",\"can_read_all_group_messages\":%}", Bool(Flag(json, at, "bot_chat_history"))) }
+    else { BuilderPrint(*type, "{\"@type\":\"userTypeRegular\"}") }
+    photo := FieldAt(json, at, "photo"); photo_id := ""; photo_dc: s64
+    if E.String(json, photo, "@type") == "userProfilePhoto" { photo_id = E.Raw(json, FieldAt(json, photo, "photo_id")); photo_dc = E.Number(json, photo, "dc_id") }
+    out: Vec(u8)
+    BuilderPrint(*out, "{\"@type\":\"user\",\"id\":%,\"first_name\":%,\"last_name\":%,\"username\":%,\"status\":%,\"type\":%,\"is_self\":%,\"photo_id\":%,\"photo_dc\":%}",
+        E.Number(json, at, "id"), E.Quote(E.String(json, at, "first_name")), E.Quote(E.String(json, at, "last_name")), E.Quote(username),
+        BuilderFinish(presence), BuilderFinish(type), Bool(Flag(json, at, "self")), E.Quote(photo_id), photo_dc)
+    return BuilderFinish(out)
+}
+
+// Members from channels.channelParticipants or messages.chatFull, with each
+// member's user alongside so callers need no lookup per member.
+Members :: (reply: string, limit: s64) -> string {
+    list := FieldAt(reply, 0, "participants"); total := E.Number(reply, 0, "count")
+    if E.Kind(reply) == "messages.chatFull" { list = FieldAt(reply, FieldAt(reply, FieldAt(reply, 0, "full_chat"), "participants"), "participants") }
+    count := ArrayCount(reply, list); if count < 0 { count = 0 }
+    if total < cast(s64)count { total = cast(s64)count }
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"chatMembers\",\"total_count\":%,\"members\":[", total); comma := ""
+    for i: 0..count - 1 {
+        if cast(s64)i >= limit { break }
+        at := ElementAt(reply, list, i); kind := E.String(reply, at, "@type"); member := E.Number(reply, at, "user_id")
+        if member == 0 { member = Messages.ChatId(E.Raw(reply, FieldAt(reply, at, "peer"))) }
+        if member == 0 { continue }
+        status := "chatMemberStatusMember"
+        if kind == "channelParticipantCreator" || kind == "chatParticipantCreator" { status = "chatMemberStatusCreator" }
+        else if kind == "channelParticipantAdmin" || kind == "chatParticipantAdmin" { status = "chatMemberStatusAdministrator" }
+        else if kind == "channelParticipantLeft" || (kind == "channelParticipantBanned" && Flag(reply, at, "left")) { status = "chatMemberStatusLeft" }
+        else if kind == "channelParticipantBanned" { status = "chatMemberStatusBanned" }
+        BuilderPrint(*out, "%{\"@type\":\"chatMember\",\"member_id\":{\"@type\":%,%:%},\"status\":{\"@type\":%,\"custom_title\":%}}", comma,
+            E.Quote(ifx member > 0 then "messageSenderUser" else "messageSenderChat"), E.Quote(ifx member > 0 then "user_id" else "chat_id"), member,
+            E.Quote(status), E.Quote(E.String(reply, at, "rank")))
+        comma = ","
+    }
+    BuilderPrint(*out, "],\"users\":["); comma = ""; users := FieldAt(reply, 0, "users")
+    for i: 0..ArrayCount(reply, users) - 1 { BuilderPrint(*out, "%", comma); BuilderPrint(*out, "%", User(reply, ElementAt(reply, users, i))); comma = "," }
+    BuilderPrint(*out, "]}"); return BuilderFinish(out)
+}
+
+// TDLib message filters and the API filters that count the same messages.
+Filter :: (name: string) -> string {
+    names: [9]string = .{"searchMessagesFilterPhoto", "searchMessagesFilterVideo", "searchMessagesFilterDocument", "searchMessagesFilterAudio", "searchMessagesFilterUrl", "searchMessagesFilterVoiceNote", "searchMessagesFilterAnimation", "searchMessagesFilterPhotoAndVideo", "searchMessagesFilterVoiceAndVideoNote"}
+    filters: [9]string = .{"inputMessagesFilterPhotos", "inputMessagesFilterVideo", "inputMessagesFilterDocument", "inputMessagesFilterMusic", "inputMessagesFilterUrl", "inputMessagesFilterVoice", "inputMessagesFilterGif", "inputMessagesFilterPhotoVideo", "inputMessagesFilterRoundVoice"}
+    for i: 0..cast(s32)8 { if names[i] == name { return filters[i] } }; return ""
+}
+CountQuery :: (peer: string, filter: string) -> string {
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"messages.getSearchCounters\",\"peer\":%,\"filters\":[{\"@type\":%}]}", peer, E.Quote(filter)); return BuilderFinish(out)
+}
+// One search counter, from the vector messages.getSearchCounters returns.
+Count :: (reply: string) -> string {
+    value: s64; if ArrayCount(reply, 0) > 0 { value = E.Number(reply, ElementAt(reply, 0, 0), "count") }
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"count\",\"count\":%}", value); return BuilderFinish(out)
+}

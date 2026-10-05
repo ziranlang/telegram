@@ -5,6 +5,7 @@ RPC :: #import "client";
 MT :: #import "mtproto";
 E :: #import "encoding";
 Messages :: #import "messages";
+Members :: #import "members";
 Random :: #import "std/random_linux";
 Time :: #import "std/timer_linux";
 Hash :: #import "crypto/sha256";
@@ -527,7 +528,10 @@ GroupReply :: (reply: string, selected: s64 = 0) -> string {
         private := E.String(reply, at, "username") == "" && ArrayCount(reply, FieldAt(reply, at, "usernames")) <= 0
         group := kind == "chat" || E.Raw(reply, FieldAt(reply, at, "megagroup")) == "true"
         out: Vec(u8)
-        BuilderPrint(*out, "{\"@type\":\"chat\",\"id\":%,\"title\":%,\"is_private\":%,\"is_creator\":%,\"is_group\":%}", id, E.Quote(E.String(reply, at, "title")), ifx private then "true" else "false", ifx E.Raw(reply, FieldAt(reply, at, "creator")) == "true" then "true" else "false", ifx group then "true" else "false")
+        // Full chats count channel members; basic groups count on the chat.
+        full := FieldAt(reply, 0, "full_chat"); members := E.Number(reply, full, "participants_count")
+        if members == 0 { members = E.Number(reply, at, "participants_count") }
+        BuilderPrint(*out, "{\"@type\":\"chat\",\"id\":%,\"title\":%,\"is_private\":%,\"is_creator\":%,\"is_group\":%,\"member_count\":%,\"description\":%}", id, E.Quote(E.String(reply, at, "title")), ifx private then "true" else "false", ifx E.Raw(reply, FieldAt(reply, at, "creator")) == "true" then "true" else "false", ifx group then "true" else "false", members, E.Quote(E.String(reply, full, "about")))
         return BuilderFinish(out)
     }
     return RPC.Error(404, "Telegram group is absent")
@@ -591,6 +595,28 @@ Dispatch :: (request: string) -> string {
             list := FieldAt(reply, FieldAt(reply, FieldAt(reply, 0, "full_chat"), "participants"), "participants")
             for i: 0..ArrayCount(reply, list) - 1 { if E.Number(reply, ElementAt(reply, list, i), "user_id") == user { return "{\"@type\":\"chatMember\",\"status\":{\"@type\":\"chatMemberStatusMember\"}}" } }
         }; return RPC.Error(404, "Telegram member is absent")
+    }
+    // Recent members of a group with roles and each member's user; broadcast
+    // channels list members only to their administrators.
+    if kind == "searchChatMembers" {
+        limit := E.Number(request, 0, "limit"); if limit <= 0 || limit > 200 { limit = 200 }; out: Vec(u8)
+        if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"channels.getParticipants\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"filter\":{\"@type\":\"channelParticipantsRecent\"},\"offset\":0,\"limit\":%,\"hash\":0}", -1000000000000 - chat, E.Number(peer, 0, "access_hash"), limit) }
+        else if chat < 0 { BuilderPrint(*out, "{\"@type\":\"messages.getFullChat\",\"chat_id\":%}", -chat) }
+        else { return RPC.Error(400, "Choose a Telegram group") }
+        reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; return Members.Members(reply, limit)
+    }
+    if kind == "getChatMessageCount" {
+        filter := Members.Filter(E.String(request, FieldAt(request, 0, "filter"), "@type")); if filter == "" { return RPC.Error(400, "Unsupported message filter") }
+        reply := Request(Members.CountQuery(peer, filter)); if E.Kind(reply) == "rpc_error" { return reply }; return Members.Count(reply)
+    }
+    if kind == "getUser" {
+        user := E.Number(request, 0, "user_id"); if user <= 0 { return RPC.Error(400, "Choose a Telegram user") }
+        input := InputPeer(user); out: Vec(u8)
+        if E.Kind(input) == "inputPeerSelf" { BuilderPrint(*out, "{\"@type\":\"users.getUsers\",\"id\":[{\"@type\":\"inputUserSelf\"}]}") }
+        else { BuilderPrint(*out, "{\"@type\":\"users.getUsers\",\"id\":[{\"@type\":\"inputUser\",\"user_id\":%,\"access_hash\":%}]}", user, E.Number(input, 0, "access_hash")) }
+        reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }
+        if ArrayCount(reply, 0) <= 0 || E.String(reply, ElementAt(reply, 0, 0), "@type") != "user" { return RPC.Error(404, "Telegram user is absent") }
+        return Members.User(reply, ElementAt(reply, 0, 0))
     }
     if kind == "getChatHistory" || kind == "getMessage" {
         out: Vec(u8)

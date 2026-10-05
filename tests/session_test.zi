@@ -1,4 +1,5 @@
 Session :: #import "session";
+Members :: #import "members";
 E :: #import "encoding";
 Auth :: #import "auth";
 TL :: #import "tl";
@@ -61,6 +62,38 @@ CallChecks :: () -> s32 {
     if TL.Encode("{\"@type\":\"phone.joinGroupCall\",\"call\":{\"@type\":\"inputGroupCall\",\"id\":12,\"access_hash\":34},\"join_as\":{\"@type\":\"inputPeerSelf\"},\"params\":{\"@type\":\"dataJSON\",\"data\":\"{}\"}}",bytes[:]) <= 0 { failures+=1;print("FAIL group call serialization\n") }
     return failures
 }
+MemberChecks :: () -> s32 {
+    failures: s32
+    // Supergroup members keep their roles and custom titles; users carry
+    // presence, bot access and active usernames.
+    reply := "{\"@type\":\"channels.channelParticipants\",\"count\":6,\"participants\":[{\"@type\":\"channelParticipantCreator\",\"user_id\":10,\"admin_rights\":{\"@type\":\"chatAdminRights\"}},{\"@type\":\"channelParticipantAdmin\",\"user_id\":11,\"promoted_by\":10,\"date\":1,\"admin_rights\":{\"@type\":\"chatAdminRights\"},\"rank\":\"Admin\"},{\"@type\":\"channelParticipant\",\"user_id\":12,\"date\":2},{\"@type\":\"channelParticipantBanned\",\"left\":true,\"peer\":{\"@type\":\"peerUser\",\"user_id\":13},\"kicked_by\":10,\"date\":3,\"banned_rights\":{\"@type\":\"chatBannedRights\",\"until_date\":0}}],\"chats\":[],\"users\":[{\"@type\":\"user\",\"id\":10,\"first_name\":\"Yoel\",\"status\":{\"@type\":\"userStatusRecently\"},\"photo\":{\"@type\":\"userProfilePhoto\",\"photo_id\":9007199254740993,\"dc_id\":2}},{\"@type\":\"user\",\"id\":11,\"self\":true,\"first_name\":\"Martin\",\"last_name\":\"Waozi\",\"usernames\":[{\"@type\":\"username\",\"username\":\"old\"},{\"@type\":\"username\",\"active\":true,\"username\":\"waozi\"}],\"status\":{\"@type\":\"userStatusOffline\",\"was_online\":1760000000}},{\"@type\":\"user\",\"id\":12,\"bot\":true,\"bot_chat_history\":true,\"first_name\":\"funbot\",\"username\":\"funbot\"}]}"
+    members := Members.Members(reply, 200); rows := FieldAt(members, 0, "members")
+    if E.Kind(members) != "chatMembers" || E.Number(members, 0, "total_count") != 6 || ArrayCount(members, rows) != 4 { failures += 1; print("FAIL supergroup members: %\n", members) }
+    roles: [4]string = .{"chatMemberStatusCreator", "chatMemberStatusAdministrator", "chatMemberStatusMember", "chatMemberStatusLeft"}
+    for i: 0..cast(s32)3 { if E.String(members, FieldAt(members, ElementAt(members, rows, i), "status"), "@type") != roles[i] { failures += 1; print("FAIL member role %\n", i) } }
+    admin := FieldAt(members, ElementAt(members, rows, 1), "status"); left := FieldAt(members, ElementAt(members, rows, 3), "member_id")
+    if E.String(members, admin, "custom_title") != "Admin" || E.Number(members, left, "user_id") != 13 { failures += 1; print("FAIL custom title and peer members\n") }
+    users := FieldAt(members, 0, "users"); owner := ElementAt(members, users, 0); self := ElementAt(members, users, 1); bot := ElementAt(members, users, 2)
+    if E.String(members, FieldAt(members, owner, "status"), "@type") != "userStatusRecently" || E.String(members, owner, "photo_id") != "9007199254740993" || E.Number(members, owner, "photo_dc") != 2 { failures += 1; print("FAIL owner presence and exact photo ID\n") }
+    if E.String(members, self, "username") != "waozi" || E.Raw(members, FieldAt(members, self, "is_self")) != "true" || E.Number(members, FieldAt(members, self, "status"), "was_online") != 1760000000 { failures += 1; print("FAIL active username and last seen\n") }
+    if E.String(members, FieldAt(members, bot, "type"), "@type") != "userTypeBot" || E.Raw(members, FieldAt(members, FieldAt(members, bot, "type"), "can_read_all_group_messages")) != "true" { failures += 1; print("FAIL bot message access\n") }
+    if ArrayCount(Members.Members(reply, 2), FieldAt(Members.Members(reply, 2), 0, "members")) != 2 { failures += 1; print("FAIL member limit\n") }
+    // Basic groups list members on their full chat.
+    basic := Members.Members("{\"@type\":\"messages.chatFull\",\"full_chat\":{\"@type\":\"chatFull\",\"id\":5,\"about\":\"\",\"participants\":{\"@type\":\"chatParticipants\",\"chat_id\":5,\"participants\":[{\"@type\":\"chatParticipantCreator\",\"user_id\":10},{\"@type\":\"chatParticipant\",\"user_id\":12,\"inviter_id\":10,\"date\":2}],\"version\":1}},\"chats\":[],\"users\":[]}", 200)
+    if E.Number(basic, 0, "total_count") != 2 || E.String(basic, FieldAt(basic, ElementAt(basic, FieldAt(basic, 0, "members"), 0), "status"), "@type") != "chatMemberStatusCreator" { failures += 1; print("FAIL basic group members: %\n", basic) }
+    // Shared-media counts use one API filter per TDLib filter.
+    query := Members.CountQuery("{\"@type\":\"inputPeerSelf\"}", Members.Filter("searchMessagesFilterUrl")); encoded: [512]u8
+    if E.String(query, ElementAt(query, FieldAt(query, 0, "filters"), 0), "@type") != "inputMessagesFilterUrl" || TL.Encode(query, encoded[:]) <= 0 || Members.Filter("searchMessagesFilterPoll") != "" { failures += 1; print("FAIL media counter request\n") }
+    counted := Members.Count("[{\"@type\":\"messages.searchCounter\",\"filter\":{\"@type\":\"inputMessagesFilterUrl\"},\"count\":136}]")
+    if E.Kind(counted) != "count" || E.Number(counted, 0, "count") != 136 || E.Number(Members.Count("[]"), 0, "count") != 0 { failures += 1; print("FAIL media counter reply: %\n", counted) }
+    // Vector replies such as users.getUsers leave the peer cache untouched.
+    Session.head = Session.tail; peers := Session.peer_count; Session.Cache("[{\"@type\":\"user\",\"id\":5,\"access_hash\":6}]")
+    if Session.peer_count != peers || Session.head != Session.tail { failures += 1; print("FAIL vector reply cache\n") }
+    // Group details carry the member count and description.
+    group := Session.GroupReply("{\"@type\":\"messages.chatFull\",\"full_chat\":{\"@type\":\"channelFull\",\"id\":7,\"about\":\"Shared projects\",\"participants_count\":6},\"chats\":[{\"@type\":\"channel\",\"id\":7,\"title\":\"Agent Lab\",\"megagroup\":true}],\"users\":[]}")
+    if E.Number(group, 0, "member_count") != 6 || E.String(group, 0, "description") != "Shared projects" { failures += 1; print("FAIL group member count: %\n", group) }
+    return failures
+}
 Main :: () -> s32 {
     failures: s32 = LoginWaitChecks()
     query := Session.GroupQuery("{\"title\":\"Errors\",\"description\":\"Command and task failures\"}")
@@ -97,6 +130,7 @@ Main :: () -> s32 {
     failures+=DialogChecks()
     failures+=MediaChecks()
     failures+=CallChecks()
+    failures+=MemberChecks()
     file := "{\"@type\":\"inputFile\",\"id\":5,\"parts\":1,\"name\":\"voice.ogg\",\"md5_checksum\":\"\"}"
     media := Session.Media("{\"@type\":\"inputMessageVoiceNote\",\"mime_type\":\"audio/ogg\",\"duration\":3}",file,"voice.ogg")
     rows := FieldAt(media,0,"attributes"); audio := E.Raw(media,ElementAt(media,rows,1))
