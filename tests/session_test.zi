@@ -90,8 +90,8 @@ MemberChecks :: () -> s32 {
     Session.head = Session.tail; peers := Session.peer_count; Session.Cache("[{\"@type\":\"user\",\"id\":5,\"access_hash\":6}]")
     if Session.peer_count != peers || Session.head != Session.tail { failures += 1; print("FAIL vector reply cache\n") }
     // Group details carry the member count and description.
-    group := Session.GroupReply("{\"@type\":\"messages.chatFull\",\"full_chat\":{\"@type\":\"channelFull\",\"id\":7,\"about\":\"Shared projects\",\"participants_count\":6},\"chats\":[{\"@type\":\"channel\",\"id\":7,\"title\":\"Agent Lab\",\"megagroup\":true}],\"users\":[]}")
-    if E.Number(group, 0, "member_count") != 6 || E.String(group, 0, "description") != "Shared projects" { failures += 1; print("FAIL group member count: %\n", group) }
+    group := Session.GroupReply("{\"@type\":\"messages.chatFull\",\"full_chat\":{\"@type\":\"channelFull\",\"id\":7,\"about\":\"Shared projects\",\"participants_count\":6,\"migrated_from_chat_id\":5323743735},\"chats\":[{\"@type\":\"channel\",\"id\":7,\"title\":\"Agent Lab\",\"megagroup\":true}],\"users\":[]}")
+    if E.Number(group, 0, "member_count") != 6 || E.String(group, 0, "description") != "Shared projects" || E.Number(group, 0, "upgraded_from_chat_id") != -5323743735 { failures += 1; print("FAIL group member count and upgraded basic group: %\n", group) }
     return failures
 }
 Main :: () -> s32 {
