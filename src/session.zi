@@ -531,7 +531,9 @@ GroupReply :: (reply: string, selected: s64 = 0) -> string {
         // Full chats count channel members; basic groups count on the chat.
         full := FieldAt(reply, 0, "full_chat"); members := E.Number(reply, full, "participants_count")
         if members == 0 { members = E.Number(reply, at, "participants_count") }
-        BuilderPrint(*out, "{\"@type\":\"chat\",\"id\":%,\"title\":%,\"is_private\":%,\"is_creator\":%,\"is_group\":%,\"member_count\":%,\"description\":%}", id, E.Quote(E.String(reply, at, "title")), ifx private then "true" else "false", ifx E.Raw(reply, FieldAt(reply, at, "creator")) == "true" then "true" else "false", ifx group then "true" else "false", members, E.Quote(E.String(reply, full, "about")))
+        // A supergroup upgraded from a basic group keeps that group's history.
+        upgraded := E.Number(reply, full, "migrated_from_chat_id")
+        BuilderPrint(*out, "{\"@type\":\"chat\",\"id\":%,\"title\":%,\"is_private\":%,\"is_creator\":%,\"is_group\":%,\"member_count\":%,\"description\":%,\"upgraded_from_chat_id\":%}", id, E.Quote(E.String(reply, at, "title")), ifx private then "true" else "false", ifx E.Raw(reply, FieldAt(reply, at, "creator")) == "true" then "true" else "false", ifx group then "true" else "false", members, E.Quote(E.String(reply, full, "about")), -upgraded)
         return BuilderFinish(out)
     }
     return RPC.Error(404, "Telegram group is absent")

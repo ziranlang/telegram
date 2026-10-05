@@ -46,7 +46,8 @@ the file's data center when it differs from the account's;
 (`inputMessagePhoto` / `inputMessageDocument` with a `path`), optionally as a
 reply. `forwardMessages` forwards messages between chats and `searchChats`
 finds people, bots, groups and channels by name, @username or +phone.
-`getChat` reports a group's member count and description. `searchChatMembers`
+`getChat` reports a group's member count, description and the basic group it
+was upgraded from. `searchChatMembers`
 lists a group's recent members (up to 200) with their roles, custom titles
 and users; `getUser` gives one user's presence, bot message access, active
 username and profile photo; `getChatMessageCount` counts a chat's photos,
