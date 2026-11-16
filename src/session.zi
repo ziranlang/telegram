@@ -236,6 +236,15 @@ ChannelDifference :: (slot: s32) -> bool {
 }
 // Announces each dialog in a messages.getDialogs reply as a chat: its
 // title (a person's full name), type, newest message and mute state.
+// The dialog's newest message, normalized, or "null" when the reply lacks it.
+TopMessage :: (reply: string, chat: s64, id: s64) -> string {
+    messages := FieldAt(reply, 0, "messages")
+    for j: 0..ArrayCount(reply, messages) - 1 {
+        m := ElementAt(reply, messages, j)
+        if E.Number(reply, m, "id") != id || Messages.ChatId(E.Raw(reply, FieldAt(reply, m, "peer_id"))) != chat || E.String(reply, m, "@type") == "messageEmpty" { continue }
+        return Messages.Normalize(E.Raw(reply, m), chat, E.Number(account.user, 0, "id"))
+    }; return "null"
+}
 Announce :: (reply: string, folder: s32) -> s32 {
     rows := FieldAt(reply, 0, "dialogs"); count := ArrayCount(reply, rows); self := E.Number(account.user, 0, "id")
     for i: 0..count - 1 {
@@ -243,7 +252,7 @@ Announce :: (reply: string, folder: s32) -> s32 {
         slot:=PeerSlot(id);remote_pts:=E.Number(reply,at,"pts")
         if slot>=0 && id<=-1000000000000 && remote_pts>0 { if channel_pts[slot]==0 { channel_pts[slot]=remote_pts } else if remote_pts>channel_pts[slot] { channel_gap[slot]=true } }
         if id < 0 { type = "chatTypeBasicGroup" }; if id <= -1000000000000 { type = "chatTypeSupergroup" }
-        list := FieldAt(reply, 0, ifx id > 0 then "users" else "chats"); channel: bool; bot: bool; photo_id := ""; photo_dc: s64
+        list := FieldAt(reply, 0, ifx id > 0 then "users" else "chats"); channel: bool; bot: bool; photo_id := ""; photo_dc: s64; members: s64
         for j: 0..ArrayCount(reply, list) - 1 {
             item := ElementAt(reply, list, j); raw_id := E.Number(reply, item, "id")
             if raw_id != (ifx id > 0 then id else (ifx id <= -1000000000000 then -1000000000000 - id else -id)) { continue }
@@ -251,14 +260,16 @@ Announce :: (reply: string, folder: s32) -> s32 {
                 title = E.String(reply, item, "first_name"); last := E.String(reply, item, "last_name")
                 if last != "" { title = ifx title == "" then last else Join(title, Join(" ", last)) }
                 if title == "" { title = "Deleted account" }; bot = E.Raw(reply, FieldAt(reply, item, "bot")) == "true"
-            } else { title = E.String(reply, item, "title"); channel = E.Raw(reply, FieldAt(reply, item, "broadcast")) == "true" }
+            } else { title = E.String(reply, item, "title"); channel = E.Raw(reply, FieldAt(reply, item, "broadcast")) == "true"; members = E.Number(reply, item, "participants_count") }
             // 64-bit photo IDs travel as text so JSON readers keep every digit.
             photo := FieldAt(reply, item, "photo")
             if E.String(reply, photo, "@type") == "userProfilePhoto" || E.String(reply, photo, "@type") == "chatPhoto" { photo_id = E.Raw(reply, FieldAt(reply, photo, "photo_id")); photo_dc = E.Number(reply, photo, "dc_id") }
         }
         if id == self && self != 0 { title = "Saved Messages" }
         settings := FieldAt(reply, at, "notify_settings"); muted := E.Number(reply, settings, "mute_until") > MT.Now()
-        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%,\"is_bot\":%},\"last_message_id\":%,\"is_muted\":%,\"folder\":%,\"photo_id\":%,\"photo_dc\":%}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false", ifx bot then "true" else "false", E.Number(reply, at, "top_message"), ifx muted then "true" else "false", folder, E.Quote(photo_id), photo_dc); Push(BuilderFinish(announce))
+        // Pinned dialogs come first, in Telegram's pinned order.
+        top := E.Number(reply, at, "top_message"); pinned := E.Raw(reply, FieldAt(reply, at, "pinned")) == "true"
+        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%,\"is_bot\":%},\"last_message_id\":%,\"is_muted\":%,\"folder\":%,\"photo_id\":%,\"photo_dc\":%,\"is_pinned\":%,\"member_count\":%,\"last_message\":%}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false", ifx bot then "true" else "false", top, ifx muted then "true" else "false", folder, E.Quote(photo_id), photo_dc, ifx pinned then "true" else "false", members, TopMessage(reply, id, top)); Push(BuilderFinish(announce))
         read_update: Vec(u8); BuilderPrint(*read_update, "{\"@type\":\"updateChatReadInbox\",\"chat_id\":%,\"last_read_inbox_message_id\":%,\"unread_count\":%}", id, E.Number(reply, at, "read_inbox_max_id"), E.Number(reply, at, "unread_count")); Push(BuilderFinish(read_update))
         if i == count - 1 {
             offset_id[folder] = E.Number(reply, at, "top_message"); offset_peer[folder] = InputPeer(id); messages := FieldAt(reply, 0, "messages")
@@ -293,20 +304,25 @@ FileRequest :: (dc: s32, query: string) -> string {
     }
     return RPC.Request(*media[dc], query)
 }
-// The largest photo size, as (thumb type, bytes).
-PhotoSize :: (message: string, photo: s32) -> string {
-    sizes := FieldAt(message, photo, "sizes"); area: s64 = -1; best := ""
+// The largest photo size, as (thumb type, bytes). With max_edge, the largest
+// size whose width and height both fit it, or the smallest when none does.
+PhotoSize :: (message: string, photo: s32, max_edge: s64 = 0) -> string {
+    sizes := FieldAt(message, photo, "sizes"); area: s64 = -1; best := ""; smallest: s64 = -1; fallback := ""
     for i: 0..ArrayCount(message, sizes) - 1 {
         at := ElementAt(message, sizes, i); kind := E.String(message, at, "@type")
         if kind != "photoSize" && kind != "photoSizeProgressive" { continue }
-        current := E.Number(message, at, "w") * E.Number(message, at, "h"); if current <= area { continue }
+        width := E.Number(message, at, "w"); height := E.Number(message, at, "h"); current := width * height
         bytes := E.Number(message, at, "size")
         if kind == "photoSizeProgressive" { list := FieldAt(message, at, "sizes"); count := ArrayCount(message, list); if count > 0 { bytes = E.Integer(E.Raw(message, ElementAt(message, list, count - 1))) } }
-        area = current; out: Vec(u8); BuilderPrint(*out, "{\"type\":%,\"size\":%}", E.Quote(E.String(message, at, "type")), bytes); best = BuilderFinish(out)
-    }; return best
+        out: Vec(u8); BuilderPrint(*out, "{\"type\":%,\"size\":%}", E.Quote(E.String(message, at, "type")), bytes); choice := BuilderFinish(out)
+        if smallest < 0 || current < smallest { smallest = current; fallback = choice }
+        if max_edge > 0 && (width > max_edge || height > max_edge) { continue }
+        if current > area { area = current; best = choice }
+    }; return ifx best != "" then best else fallback
 }
 // Downloads a message's photo or document to a new private file at
-// destination. Files larger than limit bytes are refused before download.
+// destination. Files larger than limit bytes are refused before download;
+// max_edge picks a photo size no wider or taller than it.
 Download :: (request: string) -> string {
     chat := E.Number(request, 0, "chat_id"); id := E.Number(request, 0, "message_id"); most := E.Number(request, 0, "limit"); destination := E.String(request, 0, "destination")
     peer := InputPeer(chat); query: Vec(u8)
@@ -317,7 +333,7 @@ Download :: (request: string) -> string {
     message := E.Raw(reply, ElementAt(reply, rows, 0)); media := FieldAt(message, 0, "media"); kind := E.String(message, media, "@type")
     location: Vec(u8); dc: s32; size: s64; mime := ""; name := ""
     if kind == "messageMediaPhoto" {
-        photo := FieldAt(message, media, "photo"); best := PhotoSize(message, photo)
+        photo := FieldAt(message, media, "photo"); best := PhotoSize(message, photo, E.Number(request, 0, "max_edge"))
         if E.String(message, photo, "@type") != "photo" || best == "" { return RPC.Error(404, "Telegram photo is unavailable") }
         BuilderPrint(*location, "{\"@type\":\"inputPhotoFileLocation\",\"id\":%,\"access_hash\":%,\"file_reference\":%,\"thumb_size\":%}", E.Raw(message, FieldAt(message, photo, "id")), E.Raw(message, FieldAt(message, photo, "access_hash")), E.Quote(E.String(message, photo, "file_reference")), E.Quote(E.String(best, 0, "type")))
         dc = cast(s32)E.Number(message, photo, "dc_id"); size = E.Number(best, 0, "size"); mime = "image/jpeg"; name = "photo.jpg"

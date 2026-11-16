@@ -38,9 +38,11 @@ drained so interrupted processing can replay safely.
 
 The high-level session covers the operations used by account chat mirrors;
 it is not a complete Telegram application. `loadChats` announces every chat
-with its full name, newest message and mute state. `downloadMessageFile`
-saves a message's photo or document to a new owner-only file, connecting to
-the file's data center when it differs from the account's;
+with its full name, newest message (normalized, in `last_message`), mute and
+pin state, group size and profile photo, in Telegram's own order.
+`downloadMessageFile` saves a message's photo or document to a new
+owner-only file, connecting to the file's data center when it differs from
+the account's; `max_edge` picks the largest photo size that fits it;
 `downloadChatPhoto` does the same for a chat's small profile photo.
 `sendMessage` sends text, or uploads a local photo or document
 (`inputMessagePhoto` / `inputMessageDocument` with a `path`), optionally as a

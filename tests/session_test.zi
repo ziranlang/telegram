@@ -13,12 +13,16 @@ DialogChecks :: () -> s32 {
     // Every dialog becomes a chat with a person's full name, its newest
     // message and mute state; the account's own chat is Saved Messages.
     Session.head=Session.tail;Session.account.user="{\"@type\":\"user\",\"id\":100}"
-    dialogs:="{\"@type\":\"messages.dialogsSlice\",\"count\":4,\"dialogs\":[{\"@type\":\"dialog\",\"peer\":{\"@type\":\"peerUser\",\"user_id\":200},\"top_message\":77,\"read_inbox_max_id\":70,\"unread_count\":7,\"notify_settings\":{\"@type\":\"peerNotifySettings\",\"mute_until\":2147483647}},{\"@type\":\"dialog\",\"peer\":{\"@type\":\"peerChannel\",\"channel_id\":5},\"top_message\":9,\"read_inbox_max_id\":9,\"unread_count\":0,\"notify_settings\":{\"@type\":\"peerNotifySettings\"}},{\"@type\":\"dialog\",\"peer\":{\"@type\":\"peerUser\",\"user_id\":100},\"top_message\":3,\"read_inbox_max_id\":3,\"unread_count\":0,\"notify_settings\":{\"@type\":\"peerNotifySettings\"}},{\"@type\":\"dialog\",\"peer\":{\"@type\":\"peerUser\",\"user_id\":300},\"top_message\":4,\"read_inbox_max_id\":4,\"unread_count\":0,\"notify_settings\":{\"@type\":\"peerNotifySettings\"}}],\"messages\":[],\"chats\":[{\"@type\":\"channel\",\"id\":5,\"title\":\"News\",\"broadcast\":true}],\"users\":[{\"@type\":\"user\",\"id\":200,\"first_name\":\"Alice\",\"last_name\":\"Doe\"},{\"@type\":\"user\",\"id\":100,\"first_name\":\"Owner\"},{\"@type\":\"user\",\"id\":300,\"first_name\":\"Helper\",\"bot\":true}]}"
+    dialogs:="{\"@type\":\"messages.dialogsSlice\",\"count\":4,\"dialogs\":[{\"@type\":\"dialog\",\"pinned\":true,\"peer\":{\"@type\":\"peerUser\",\"user_id\":200},\"top_message\":77,\"read_inbox_max_id\":70,\"unread_count\":7,\"notify_settings\":{\"@type\":\"peerNotifySettings\",\"mute_until\":2147483647}},{\"@type\":\"dialog\",\"peer\":{\"@type\":\"peerChannel\",\"channel_id\":5},\"top_message\":9,\"read_inbox_max_id\":9,\"unread_count\":0,\"notify_settings\":{\"@type\":\"peerNotifySettings\"}},{\"@type\":\"dialog\",\"peer\":{\"@type\":\"peerUser\",\"user_id\":100},\"top_message\":3,\"read_inbox_max_id\":3,\"unread_count\":0,\"notify_settings\":{\"@type\":\"peerNotifySettings\"}},{\"@type\":\"dialog\",\"peer\":{\"@type\":\"peerUser\",\"user_id\":300},\"top_message\":4,\"read_inbox_max_id\":4,\"unread_count\":0,\"notify_settings\":{\"@type\":\"peerNotifySettings\"}}],\"messages\":[{\"@type\":\"message\",\"id\":77,\"peer_id\":{\"@type\":\"peerUser\",\"user_id\":200},\"from_id\":{\"@type\":\"peerUser\",\"user_id\":200},\"date\":1794700000,\"message\":\"See you soon\"}],\"chats\":[{\"@type\":\"channel\",\"id\":5,\"title\":\"News\",\"broadcast\":true,\"participants_count\":1200}],\"users\":[{\"@type\":\"user\",\"id\":200,\"first_name\":\"Alice\",\"last_name\":\"Doe\"},{\"@type\":\"user\",\"id\":100,\"first_name\":\"Owner\"},{\"@type\":\"user\",\"id\":300,\"first_name\":\"Helper\",\"bot\":true}]}"
     if Session.Announce(dialogs,0)!=4 { failures+=1;print("FAIL every dialog is announced\n") }
     person:=Session.Receive(0.0);chat:=FieldAt(person,0,"chat");unused Session.Receive(0.0)
     if E.String(person,chat,"title")!="Alice Doe" || E.Number(person,chat,"last_message_id")!=77 || E.Raw(person,FieldAt(person,chat,"is_muted"))!="true" { failures+=1;print("FAIL private chat carries full name, newest message and mute state\n") }
     news:=Session.Receive(0.0);chat=FieldAt(news,0,"chat");unused Session.Receive(0.0)
     if E.String(news,chat,"title")!="News" || E.Raw(news,FieldAt(news,FieldAt(news,chat,"type"),"is_channel"))!="true" || E.Number(news,chat,"id")!=-1000000000005 || E.Raw(news,FieldAt(news,chat,"is_muted"))!="false" { failures+=1;print("FAIL broadcast channel is announced as a channel\n") }
+    // Telegram's order needs the pin, the newest message and group sizes.
+    if E.Raw(news,FieldAt(news,chat,"is_pinned"))!="false" || E.Number(news,chat,"member_count")!=1200 || E.Raw(news,FieldAt(news,chat,"last_message"))!="null" { failures+=1;print("FAIL channel size and absent newest message\n") }
+    chat=FieldAt(person,0,"chat");last:=FieldAt(person,chat,"last_message")
+    if E.Raw(person,FieldAt(person,chat,"is_pinned"))!="true" || E.Number(person,last,"id")!=77 || E.Number(person,last,"date")!=1794700000 || E.String(person,FieldAt(person,FieldAt(person,last,"content"),"text"),"text")!="See you soon" { failures+=1;print("FAIL pinned chat carries its newest message\n") }
     saved:=Session.Receive(0.0);unused Session.Receive(0.0)
     if E.String(saved,FieldAt(saved,0,"chat"),"title")!="Saved Messages" { failures+=1;print("FAIL own chat is Saved Messages\n") }
     helper:=Session.Receive(0.0);unused Session.Receive(0.0)
@@ -31,6 +35,11 @@ MediaChecks :: () -> s32 {
     message:="{\"@type\":\"message\",\"media\":{\"@type\":\"messageMediaPhoto\",\"photo\":{\"@type\":\"photo\",\"id\":5,\"sizes\":[{\"@type\":\"photoStrippedSize\",\"type\":\"i\"},{\"@type\":\"photoSize\",\"type\":\"m\",\"w\":320,\"h\":240,\"size\":9000},{\"@type\":\"photoSizeProgressive\",\"type\":\"y\",\"w\":1280,\"h\":960,\"sizes\":[4000,30000,81234]},{\"@type\":\"photoSize\",\"type\":\"x\",\"w\":800,\"h\":600,\"size\":50000}]}}}"
     best:=Session.PhotoSize(message,FieldAt(message,FieldAt(message,0,"media"),"photo"))
     if E.String(best,0,"type")!="y" || E.Number(best,0,"size")!=81234 { failures+=1;print("FAIL largest photo size\n") }
+    // An edge limit takes the largest size within it, or the smallest.
+    fitting:=Session.PhotoSize(message,FieldAt(message,FieldAt(message,0,"media"),"photo"),800)
+    if E.String(fitting,0,"type")!="x" { failures+=1;print("FAIL photo size within an edge limit\n") }
+    tiny:=Session.PhotoSize(message,FieldAt(message,FieldAt(message,0,"media"),"photo"),100)
+    if E.String(tiny,0,"type")!="m" { failures+=1;print("FAIL smallest photo size when none fits\n") }
     return failures
 }
 LoginWaitChecks :: () -> s32 {
