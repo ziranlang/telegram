@@ -8,7 +8,7 @@ load TDLib, run a Python bridge, or depend on a Telegram C/C++ implementation.
 Exports are package-qualified: `telegram/tl`, `telegram/mtproto`,
 `telegram/client`, `telegram/auth`, `telegram/messages`, `telegram/members` and
 `telegram/session`.
-Use `ziran add https://github.com/ziranlang/telegram.git` once this repository
+Use `ziran add https://git.waozi.xyz/ziranlang/telegram.git` once this repository
 is published. For development, resolve the canonical checkout through an
 ignored `ziran.local.toml` override and commit the generated lock file.
 

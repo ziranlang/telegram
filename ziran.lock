@@ -4,27 +4,28 @@
     {
       "commit": "ba50e2bde7bde53779aec7fdbcd807cc83c69a19",
       "dependencies": {},
-      "id": "p66daba5e6bf76a70",
+      "id": "p7e7cdb230f96042c",
       "name": "crypto",
-      "ref": "master",
-      "url": "https://github.com/ziranlang/crypto.git"
+      "ref": "ba50e2bde7bde53779aec7fdbcd807cc83c69a19",
+      "url": "https://git.waozi.xyz/ziranlang/crypto.git"
     },
     {
       "commit": "b081b26058daac4c61c2f7cb0cdff36496363b18",
       "dependencies": {},
-      "id": "pade9a596789ee212",
+      "id": "pd037be58ea81a016",
       "name": "compression",
-      "ref": "master",
-      "url": "https://github.com/ziranlang/compression.git"
+      "ref": "b081b26058daac4c61c2f7cb0cdff36496363b18",
+      "url": "https://git.waozi.xyz/ziranlang/compression.git"
     }
   ],
   "root": {
-    "dependencies": {"compression": "pade9a596789ee212", "crypto": "p66daba5e6bf76a70"},
+    "dependencies": {"compression": "pd037be58ea81a016", "crypto": "p7e7cdb230f96042c"},
+    "dependency_refs": {"compression": "b081b26058daac4c61c2f7cb0cdff36496363b18", "crypto": "ba50e2bde7bde53779aec7fdbcd807cc83c69a19"},
     "name": "telegram"
   },
   "toolchain": {
     "commit": "5a2a5cd955b979bc544e3d95f84576751d5361be",
-    "ref": "master",
-    "url": "https://github.com/ziranlang/ziran.git"
+    "ref": "5a2a5cd955b979bc544e3d95f84576751d5361be",
+    "url": "https://git.waozi.xyz/ziranlang/ziran.git"
   }
 }
