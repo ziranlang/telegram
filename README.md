@@ -76,3 +76,5 @@ Protocol references: [authorization](https://core.telegram.org/api/auth),
 [update sequences](https://core.telegram.org/api/updates),
 [SRP](https://core.telegram.org/api/srp), and
 [MTProto 2.0](https://core.telegram.org/mtproto/description).
+
+Forum dialogs expose `is_forum`; `getForumTopics` returns normalized titles, pins and unread counts. Topic history, read receipts and sends preserve `message_thread_id`, including reply targets. These paths are covered by offline native normalization and TL serialization tests.

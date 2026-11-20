@@ -253,7 +253,7 @@ Announce :: (reply: string, folder: s32) -> s32 {
         slot:=PeerSlot(id);remote_pts:=E.Number(reply,at,"pts")
         if slot>=0 && id<=-1000000000000 && remote_pts>0 { if channel_pts[slot]==0 { channel_pts[slot]=remote_pts } else if remote_pts>channel_pts[slot] { channel_gap[slot]=true } }
         if id < 0 { type = "chatTypeBasicGroup" }; if id <= -1000000000000 { type = "chatTypeSupergroup" }
-        list := FieldAt(reply, 0, ifx id > 0 then "users" else "chats"); channel: bool; bot: bool; photo_id := ""; photo_dc: s64; members: s64
+        list := FieldAt(reply, 0, ifx id > 0 then "users" else "chats"); channel: bool; bot: bool; forum: bool; photo_id := ""; photo_dc: s64; members: s64
         for j: 0..ArrayCount(reply, list) - 1 {
             item := ElementAt(reply, list, j); raw_id := E.Number(reply, item, "id")
             if raw_id != (ifx id > 0 then id else (ifx id <= -1000000000000 then -1000000000000 - id else -id)) { continue }
@@ -261,7 +261,7 @@ Announce :: (reply: string, folder: s32) -> s32 {
                 title = E.String(reply, item, "first_name"); last := E.String(reply, item, "last_name")
                 if last != "" { title = ifx title == "" then last else Join(title, Join(" ", last)) }
                 if title == "" { title = "Deleted account" }; bot = E.Raw(reply, FieldAt(reply, item, "bot")) == "true"
-            } else { title = E.String(reply, item, "title"); channel = E.Raw(reply, FieldAt(reply, item, "broadcast")) == "true"; members = E.Number(reply, item, "participants_count") }
+            } else { title = E.String(reply, item, "title"); channel = E.Raw(reply, FieldAt(reply, item, "broadcast")) == "true"; forum = E.Raw(reply, FieldAt(reply, item, "forum")) == "true"; members = E.Number(reply, item, "participants_count") }
             // 64-bit photo IDs travel as text so JSON readers keep every digit.
             photo := FieldAt(reply, item, "photo")
             if E.String(reply, photo, "@type") == "userProfilePhoto" || E.String(reply, photo, "@type") == "chatPhoto" { photo_id = E.Raw(reply, FieldAt(reply, photo, "photo_id")); photo_dc = E.Number(reply, photo, "dc_id") }
@@ -270,7 +270,7 @@ Announce :: (reply: string, folder: s32) -> s32 {
         settings := FieldAt(reply, at, "notify_settings"); muted := E.Number(reply, settings, "mute_until") > MT.Now()
         // Pinned dialogs come first, in Telegram's pinned order.
         top := E.Number(reply, at, "top_message"); pinned := E.Raw(reply, FieldAt(reply, at, "pinned")) == "true"
-        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%,\"is_bot\":%},\"last_message_id\":%,\"is_muted\":%,\"folder\":%,\"photo_id\":%,\"photo_dc\":%,\"is_pinned\":%,\"member_count\":%,\"last_message\":%}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false", ifx bot then "true" else "false", top, ifx muted then "true" else "false", folder, E.Quote(photo_id), photo_dc, ifx pinned then "true" else "false", members, TopMessage(reply, id, top))
+        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%,\"is_bot\":%},\"last_message_id\":%,\"is_muted\":%,\"folder\":%,\"photo_id\":%,\"photo_dc\":%,\"is_pinned\":%,\"is_forum\":%,\"member_count\":%,\"last_message\":%}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false", ifx bot then "true" else "false", top, ifx muted then "true" else "false", folder, E.Quote(photo_id), photo_dc, ifx pinned then "true" else "false", ifx forum then "true" else "false", members, TopMessage(reply, id, top))
         announcement:=BuilderFinish(announce)
         Push(Join(announcement[:cast(s32)announcement.count-2],Join(Folders.DialogFields(reply,at,id),"}}")))
         read_update: Vec(u8); BuilderPrint(*read_update, "{\"@type\":\"updateChatReadInbox\",\"chat_id\":%,\"last_read_inbox_message_id\":%,\"unread_count\":%}", id, E.Number(reply, at, "read_inbox_max_id"), E.Number(reply, at, "unread_count")); Push(BuilderFinish(read_update))
@@ -283,8 +283,10 @@ Announce :: (reply: string, folder: s32) -> s32 {
 Dialogs :: (folder: s32) -> string {
     peer := E.Copy(offset_peer[folder]); if peer == "" { peer = "{\"@type\":\"inputPeerEmpty\"}" }; out: Vec(u8)
     BuilderPrint(*out, "{\"@type\":\"messages.getDialogs\",\"folder_id\":%,\"offset_date\":%,\"offset_id\":%,\"offset_peer\":%,\"limit\":100,\"hash\":0}", folder, offset_date[folder], offset_id[folder], peer)
-    reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }
-    if Announce(reply, folder) <= 0 { return RPC.Error(404, "All Telegram chats loaded") }; return "{\"@type\":\"ok\"}"
+    query := BuilderFinish(out); reply := Request(query); Release(query)
+    if E.Kind(reply) == "rpc_error" { return reply }
+    count := Announce(reply, folder); Release(reply)
+    if count <= 0 { return RPC.Error(404, "All Telegram chats loaded") }; return "{\"@type\":\"ok\"}"
 }
 // Media lives on its own data center; each gets one connection authorized
 // with an authorization exported from the account's data center.
@@ -424,8 +426,47 @@ Upload :: (path: string, name: string) -> string {
     return BuilderFinish(out)
 }
 ReplyTo :: (request: string) -> string {
-    message := E.Number(request, 0, "reply_to_message_id"); if message <= 0 { return "" }
-    out: Vec(u8); BuilderPrint(*out, ",\"reply_to\":{\"@type\":\"inputReplyToMessage\",\"reply_to_msg_id\":%}", message); return BuilderFinish(out)
+    message := E.Number(request, 0, "reply_to_message_id")
+    thread := E.Number(request, 0, "message_thread_id")
+    if message <= 0 && thread <= 1 { return "" }
+    out: Vec(u8)
+    if message > 0 && thread > 0 {
+        BuilderPrint(*out, ",\"reply_to\":{\"@type\":\"inputReplyToMessage\",\"reply_to_msg_id\":%,\"top_msg_id\":%}", message, thread)
+    } else if message > 0 {
+        BuilderPrint(*out, ",\"reply_to\":{\"@type\":\"inputReplyToMessage\",\"reply_to_msg_id\":%}", message)
+    } else {
+        BuilderPrint(*out, ",\"reply_to\":{\"@type\":\"inputReplyToMessage\",\"reply_to_msg_id\":%,\"top_msg_id\":%}", thread, thread)
+    }
+    return BuilderFinish(out)
+}
+ForumTopics :: (request: string, chat: s64, peer: string) -> string {
+    limit := E.Number(request, 0, "limit"); if limit <= 0 || limit > 100 { limit = 100 }
+    query: Vec(u8)
+    BuilderPrint(*query, "{\"@type\":\"messages.getForumTopics\",\"peer\":%,\"offset_date\":0,\"offset_id\":0,\"offset_topic\":0,\"limit\":%}", peer, limit)
+    qtext := BuilderFinish(query); reply := Request(qtext); Release(qtext)
+    if E.Kind(reply) == "rpc_error" { return reply }
+    defer { Release(reply) }
+    return ForumTopicsView(reply,chat)
+}
+ForumTopicsView :: (reply: string, chat: s64) -> string {
+    rows := FieldAt(reply, 0, "topics"); total := E.Number(reply, 0, "count"); count := ArrayCount(reply, rows)
+    if total < cast(s64)count { total = cast(s64)count }
+    out: Vec(u8); BuilderPrint(*out, "{\"@type\":\"forumTopics\",\"total_count\":%,\"topics\":[", total); comma := ""
+    for i: 0..count - 1 {
+        at := ElementAt(reply, rows, i); if E.String(reply, at, "@type") != "forumTopic" { continue }
+        id := E.Number(reply, at, "id"); top := E.Number(reply, at, "top_message")
+        title := E.String(reply, at, "title"); if title == "" && id == 1 { title = "General" }
+        pinned := E.Raw(reply, FieldAt(reply, at, "pinned")) == "true"
+        closed := E.Raw(reply, FieldAt(reply, at, "closed")) == "true"
+        hidden := E.Raw(reply, FieldAt(reply, at, "hidden")) == "true"
+        BuilderPrint(*out, "%{\"id\":%,\"title\":%,\"icon_color\":%,\"pinned\":%,\"closed\":%,\"hidden\":%,\"top_message\":%,\"read_inbox_max_id\":%,\"unread_count\":%,\"date\":%,\"last_message\":%}",
+            comma, id, E.Quote(title), E.Number(reply, at, "icon_color"),
+            ifx pinned then "true" else "false", ifx closed then "true" else "false", ifx hidden then "true" else "false",
+            top, E.Number(reply, at, "read_inbox_max_id"), E.Number(reply, at, "unread_count"), E.Number(reply, at, "date"),
+            TopMessage(reply, chat, top))
+        comma = ","
+    }
+    BuilderPrint(*out, "]}"); return BuilderFinish(out)
 }
 // The new message's ID from a send reply; other updates apply as usual.
 SentId :: (reply: string) -> s64 {
@@ -640,12 +681,21 @@ Dispatch :: (request: string) -> string {
         if ArrayCount(reply, 0) <= 0 || E.String(reply, ElementAt(reply, 0, 0), "@type") != "user" { return RPC.Error(404, "Telegram user is absent") }
         return Members.User(reply, ElementAt(reply, 0, 0))
     }
+    if kind == "getForumTopics" { return ForumTopics(request, chat, peer) }
     if kind == "getChatHistory" || kind == "getMessage" {
         out: Vec(u8)
-        if kind == "getChatHistory" { limit := E.Number(request, 0, "limit"); if limit <= 0 || limit > 100 { limit = 100 }; BuilderPrint(*out, "{\"@type\":\"messages.getHistory\",\"peer\":%,\"offset_id\":%,\"offset_date\":0,\"add_offset\":0,\"limit\":%,\"max_id\":0,\"min_id\":0,\"hash\":0}", peer, E.Number(request, 0, "from_message_id"), limit) }
+        if kind == "getChatHistory" {
+            limit := E.Number(request, 0, "limit"); if limit <= 0 || limit > 100 { limit = 100 }
+            thread := E.Number(request, 0, "message_thread_id")
+            if thread > 0 { BuilderPrint(*out, "{\"@type\":\"messages.getReplies\",\"peer\":%,\"msg_id\":%,\"offset_id\":%,\"offset_date\":0,\"add_offset\":0,\"limit\":%,\"max_id\":0,\"min_id\":0,\"hash\":0}", peer, thread, E.Number(request, 0, "from_message_id"), limit) }
+            else { BuilderPrint(*out, "{\"@type\":\"messages.getHistory\",\"peer\":%,\"offset_id\":%,\"offset_date\":0,\"add_offset\":0,\"limit\":%,\"max_id\":0,\"min_id\":0,\"hash\":0}", peer, E.Number(request, 0, "from_message_id"), limit) }
+        }
         else if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"channels.getMessages\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"id\":[{\"@type\":\"inputMessageID\",\"id\":%}]}", -1000000000000 - chat, E.Number(peer, 0, "access_hash"), message) }
         else { BuilderPrint(*out, "{\"@type\":\"messages.getMessages\",\"id\":[{\"@type\":\"inputMessageID\",\"id\":%}]}", message) }
-        reply := Request(BuilderFinish(out)); if E.Kind(reply) == "rpc_error" { return reply }; rows := FieldAt(reply, 0, "messages")
+        qtext := BuilderFinish(out); reply := Request(qtext); Release(qtext)
+        if E.Kind(reply) == "rpc_error" { return reply }
+        defer { Release(reply) }
+        rows := FieldAt(reply, 0, "messages")
         if kind == "getMessage" { if ArrayCount(reply, rows) <= 0 || E.String(reply,ElementAt(reply,rows,0),"@type")=="messageEmpty" { return RPC.Error(404, "Telegram message is absent") }; return Messages.Normalize(E.Raw(reply, ElementAt(reply, rows, 0)), chat,E.Number(account.user,0,"id")) }
         // Slices report the whole history's size; complete replies are the history.
         total := E.Number(reply, 0, "count"); if total < cast(s64)ArrayCount(reply, rows) { total = cast(s64)ArrayCount(reply, rows) }
@@ -675,7 +725,9 @@ Dispatch :: (request: string) -> string {
         out: Vec(u8)
         ids := FieldAt(request, 0, "message_ids"); max: s64
         for i: 0..ArrayCount(request, ids) - 1 { id := E.Integer(E.Raw(request, ElementAt(request, ids, i))); if id > max { max = id } }
-        if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"channels.readHistory\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"max_id\":%}", -1000000000000 - chat, E.Number(peer, 0, "access_hash"), max) }
+        thread := E.Number(request, 0, "message_thread_id")
+        if thread > 0 { BuilderPrint(*out, "{\"@type\":\"messages.readDiscussion\",\"peer\":%,\"msg_id\":%,\"read_max_id\":%}", peer, thread, max) }
+        else if chat <= -1000000000000 { BuilderPrint(*out, "{\"@type\":\"channels.readHistory\",\"channel\":{\"@type\":\"inputChannel\",\"channel_id\":%,\"access_hash\":%},\"max_id\":%}", -1000000000000 - chat, E.Number(peer, 0, "access_hash"), max) }
         else { BuilderPrint(*out, "{\"@type\":\"messages.readHistory\",\"peer\":%,\"max_id\":%}", peer, max) }; return Request(BuilderFinish(out))
     }; return RPC.Error(400, "Unsupported Telegram request")
 }
