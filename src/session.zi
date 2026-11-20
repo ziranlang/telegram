@@ -6,6 +6,7 @@ MT :: #import "mtproto";
 E :: #import "encoding";
 Messages :: #import "messages";
 Members :: #import "members";
+Folders :: #import "folders";
 Random :: #import "std/random_linux";
 Time :: #import "std/timer_linux";
 Hash :: #import "crypto/sha256";
@@ -269,7 +270,9 @@ Announce :: (reply: string, folder: s32) -> s32 {
         settings := FieldAt(reply, at, "notify_settings"); muted := E.Number(reply, settings, "mute_until") > MT.Now()
         // Pinned dialogs come first, in Telegram's pinned order.
         top := E.Number(reply, at, "top_message"); pinned := E.Raw(reply, FieldAt(reply, at, "pinned")) == "true"
-        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%,\"is_bot\":%},\"last_message_id\":%,\"is_muted\":%,\"folder\":%,\"photo_id\":%,\"photo_dc\":%,\"is_pinned\":%,\"member_count\":%,\"last_message\":%}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false", ifx bot then "true" else "false", top, ifx muted then "true" else "false", folder, E.Quote(photo_id), photo_dc, ifx pinned then "true" else "false", members, TopMessage(reply, id, top)); Push(BuilderFinish(announce))
+        announce: Vec(u8); BuilderPrint(*announce, "{\"@type\":\"updateNewChat\",\"chat\":{\"id\":%,\"title\":%,\"type\":{\"@type\":%,\"user_id\":%,\"is_channel\":%,\"is_bot\":%},\"last_message_id\":%,\"is_muted\":%,\"folder\":%,\"photo_id\":%,\"photo_dc\":%,\"is_pinned\":%,\"member_count\":%,\"last_message\":%}}", id, E.Quote(title), E.Quote(type), id, ifx channel then "true" else "false", ifx bot then "true" else "false", top, ifx muted then "true" else "false", folder, E.Quote(photo_id), photo_dc, ifx pinned then "true" else "false", members, TopMessage(reply, id, top))
+        announcement:=BuilderFinish(announce)
+        Push(Join(announcement[:cast(s32)announcement.count-2],Join(Folders.DialogFields(reply,at,id),"}}")))
         read_update: Vec(u8); BuilderPrint(*read_update, "{\"@type\":\"updateChatReadInbox\",\"chat_id\":%,\"last_read_inbox_message_id\":%,\"unread_count\":%}", id, E.Number(reply, at, "read_inbox_max_id"), E.Number(reply, at, "unread_count")); Push(BuilderFinish(read_update))
         if i == count - 1 {
             offset_id[folder] = E.Number(reply, at, "top_message"); offset_peer[folder] = InputPeer(id); messages := FieldAt(reply, 0, "messages")
@@ -583,6 +586,7 @@ Dispatch :: (request: string) -> string {
         }; return RPC.Error(400,"Unsupported call request")
     }
     if kind == "getMe" { return account.user }
+    if kind == "getChatFolders" { return Folders.Normalize(Request(Folders.Query),E.Number(account.user,0,"id")) }
     if kind == "createNewSupergroupChat" {
         query := GroupQuery(request); if query == "" { return RPC.Error(400, "A group title is required") }
         reply := Request(query)

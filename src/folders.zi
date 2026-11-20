@@ -1,0 +1,92 @@
+// Telegram's saved dialog filters, without account access hashes.
+E :: #import "encoding";
+#import "std/json_scan"
+#import "std/text"
+
+Query :: "{\"@type\":\"messages.getDialogFilters\"}";
+Chat :: struct {
+    id: s64
+    contact: bool
+    bot: bool
+    group: bool
+    channel: bool
+    muted: bool
+    read: bool
+    archived: bool
+}
+Flag :: (json: string, at: s32, name: string) -> bool {
+    return MatchLiteral(json, FieldAt(json, at, name), "true")
+}
+Peer :: (value: string, self: s64) -> s64 {
+    kind:=E.Kind(value)
+    if kind=="inputPeerSelf" { return self }
+    if kind=="inputPeerUser" { return E.Number(value,0,"user_id") }
+    if kind=="inputPeerChat" { return -E.Number(value,0,"chat_id") }
+    if kind=="inputPeerChannel" { return -1000000000000-E.Number(value,0,"channel_id") }
+    return 0
+}
+Peers :: (out: *Vec(u8), reply: string, at: s32, name: string, self: s64) {
+    BuilderPrint(out,",%:[",E.Quote(name)); comma:=""
+    list:=FieldAt(reply,at,name)
+    for i: 0..ArrayCount(reply,list)-1 {
+        id:=Peer(E.Raw(reply,ElementAt(reply,list,i)),self)
+        if id==0 { continue }
+        BuilderPrint(out,"%",comma); BuilderPrint(out,"%",id); comma=","
+    }
+    BuilderPrint(out,"]")
+}
+Normalize :: (reply: string, self: s64) -> string {
+    kind:=E.Kind(reply); if kind=="rpc_error" || kind=="error" { return E.Copy(reply) }
+    if kind!="messages.dialogFilters" { return "" }
+    list:=FieldAt(reply,0,"filters"); has_default:=false
+    for i: 0..ArrayCount(reply,list)-1 {
+        if E.Kind(E.Raw(reply,ElementAt(reply,list,i)))=="dialogFilterDefault" { has_default=true }
+    }
+    out: Vec(u8); BuilderPrint(*out,"{\"@type\":\"chatFolders\",\"folders\":["); comma:=""
+    if !has_default { BuilderPrint(*out,"{\"id\":0,\"title\":\"All chats\",\"is_default\":true}"); comma="," }
+    for i: 0..ArrayCount(reply,list)-1 {
+        at:=ElementAt(reply,list,i); type:=E.String(reply,at,"@type")
+        if type=="dialogFilterDefault" {
+            BuilderPrint(*out,"%{\"id\":0,\"title\":\"All chats\",\"is_default\":true}",comma); comma=","; continue
+        }
+        if type!="dialogFilter" && type!="dialogFilterChatlist" { continue }
+        id:=E.Number(reply,at,"id"); if id<=0 { continue }
+        title:=E.String(reply,FieldAt(reply,at,"title"),"text")
+        BuilderPrint(*out,"%{\"id\":%,\"title\":%,\"emoticon\":%,\"is_default\":false,\"is_shared\":%",comma,id,E.Quote(title),E.Quote(E.String(reply,at,"emoticon")),ifx type=="dialogFilterChatlist" then "true" else "false")
+        names: [8]string=.{"contacts","non_contacts","groups","broadcasts","bots","exclude_muted","exclude_read","exclude_archived"}
+        for name: names { BuilderPrint(*out,",%:%",E.Quote(name),ifx Flag(reply,at,name) then "true" else "false") }
+        Peers(*out,reply,at,"pinned_peers",self); Peers(*out,reply,at,"include_peers",self); Peers(*out,reply,at,"exclude_peers",self)
+        BuilderPrint(*out,"}"); comma=","
+    }
+    BuilderPrint(*out,"]}"); return BuilderFinish(out)
+}
+Position :: (folder: string, name: string, id: s64) -> s32 {
+    list:=FieldAt(folder,0,name)
+    for i: 0..ArrayCount(folder,list)-1 { if E.Integer(E.Raw(folder,ElementAt(folder,list,i)))==id { return i } }
+    return -1
+}
+Matches :: (folder: string, chat: Chat) -> bool {
+    if Flag(folder,0,"is_default") { return !chat.archived }
+    if Position(folder,"exclude_peers",chat.id)>=0 { return false }
+    if Position(folder,"pinned_peers",chat.id)>=0 || Position(folder,"include_peers",chat.id)>=0 { return true }
+    if (chat.muted && Flag(folder,0,"exclude_muted")) || (chat.read && Flag(folder,0,"exclude_read")) || (chat.archived && Flag(folder,0,"exclude_archived")) { return false }
+    if chat.bot { return Flag(folder,0,"bots") }
+    if chat.channel { return Flag(folder,0,"broadcasts") }
+    if chat.group { return Flag(folder,0,"groups") }
+    return Flag(folder,0,ifx chat.contact then "contacts" else "non_contacts")
+}
+// Dialog metadata needed to evaluate folders in clients with a cached list.
+DialogFields :: (reply: string, dialog: s32, chat: s64) -> string {
+    contact:=false; users:=FieldAt(reply,0,"users")
+    if chat>0 {
+        for i: 0..ArrayCount(reply,users)-1 {
+            at:=ElementAt(reply,users,i)
+            if E.Number(reply,at,"id")==chat { contact=Flag(reply,at,"contact"); break }
+        }
+    }
+    out: Vec(u8)
+    BuilderPrint(*out,",\"is_contact\":%,\"is_marked_as_unread\":%,\"unread_mention_count\":%,\"unread_reaction_count\":%",
+        ifx contact then "true" else "false",ifx Flag(reply,dialog,"unread_mark") then "true" else "false",
+        E.Number(reply,dialog,"unread_mentions_count"),E.Number(reply,dialog,"unread_reactions_count"))
+    return BuilderFinish(out)
+}

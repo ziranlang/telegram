@@ -14,6 +14,7 @@ client = "src/client.zi"
 auth = "src/auth.zi"
 messages = "src/messages.zi"
 members = "src/members.zi"
+folders = "src/folders.zi"
 session = "src/session.zi"
 
 [dependencies.crypto]

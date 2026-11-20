@@ -27,6 +27,13 @@ receipts, edits, deletions and service messages are normalized in Ziran. The
 same connection receives updates and recovers account and channel sequence
 gaps. It does not start a bot-token poller.
 
+`getChatFolders` reads the account's saved dialog filters. Its `chatFolders`
+reply preserves folder order, titles, emoji, explicit peer membership and
+type/read/mute/archive rules, with an All chats entry. Access hashes stay
+inside the account session. `telegram/folders` also exposes pure `Normalize`,
+`Matches` and pinned-peer `Position` helpers; dialog announcements include
+contact and unread-marker/mention/reaction metadata for cached filtering.
+
 Before `setTdlibParameters`, create an owner-controlled directory with mode
 0700 and provide its path as `database_directory`. That historical request name
 initializes this package, without TDLib. The session pins the directory and

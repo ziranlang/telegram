@@ -4,6 +4,8 @@ LOCKED := $(if $(wildcard ziran.local.toml),,--locked)
 check:
 	$(ZIRAN) check --project $(LOCKED) src/tl.zi src/auth.zi src/session.zi
 test:
+	$(ZIRAN) build --project $(LOCKED) --target=c --entry folders_test:Main --exe -o build/folders-test tests/folders_test.zi
+	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS build/folders-test/folders_test
 	$(ZIRAN) build --project $(LOCKED) --target=c --entry tl_test:Main --exe -o build/tests tests/tl_test.zi
 	env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY -u DBUS_SESSION_BUS_ADDRESS build/tests/tl_test
 	$(ZIRAN) build --project $(LOCKED) --target=c --entry auth_test:Main --exe -o build/auth-test tests/auth_test.zi
