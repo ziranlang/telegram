@@ -627,6 +627,17 @@ Dispatch :: (request: string) -> string {
         }; return RPC.Error(400,"Unsupported call request")
     }
     if kind == "getMe" { return account.user }
+    if kind == "setName" {
+        first := E.String(request, 0, "first_name"); last := E.String(request, 0, "last_name")
+        if first == "" { return RPC.Error(400, "First name is required") }
+        out: Vec(u8)
+        BuilderPrint(*out, "{\"@type\":\"account.updateProfile\",\"first_name\":%,\"last_name\":%}", E.Quote(first), E.Quote(last))
+        reply := Request(BuilderFinish(out))
+        if E.Kind(reply) == "rpc_error" { return reply }
+        user := Members.User(reply, 0)
+        if E.Number(user, 0, "id") > 0 { account.user = user }
+        return user
+    }
     if kind == "getChatFolders" { return Folders.Normalize(Request(Folders.Query),E.Number(account.user,0,"id")) }
     if kind == "createNewSupergroupChat" {
         query := GroupQuery(request); if query == "" { return RPC.Error(400, "A group title is required") }
