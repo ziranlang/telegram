@@ -2,11 +2,11 @@
   "format": 1,
   "packages": [
     {
-      "commit": "ba50e2bde7bde53779aec7fdbcd807cc83c69a19",
+      "commit": "51add53b2ab0bc8f6c1b524f0b62b66e20035c10",
       "dependencies": {},
-      "id": "p7e7cdb230f96042c",
+      "id": "p2d31be014a415e99",
       "name": "crypto",
-      "ref": "ba50e2bde7bde53779aec7fdbcd807cc83c69a19",
+      "ref": "51add53b2ab0bc8f6c1b524f0b62b66e20035c10",
       "url": "https://git.waozi.xyz/ziranlang/crypto.git"
     },
     {
@@ -19,13 +19,13 @@
     }
   ],
   "root": {
-    "dependencies": {"compression": "pd037be58ea81a016", "crypto": "p7e7cdb230f96042c"},
-    "dependency_refs": {"compression": "b081b26058daac4c61c2f7cb0cdff36496363b18", "crypto": "ba50e2bde7bde53779aec7fdbcd807cc83c69a19"},
+    "dependencies": {"compression": "pd037be58ea81a016", "crypto": "p2d31be014a415e99"},
+    "dependency_refs": {"compression": "b081b26058daac4c61c2f7cb0cdff36496363b18", "crypto": "51add53b2ab0bc8f6c1b524f0b62b66e20035c10"},
     "name": "telegram"
   },
   "toolchain": {
-    "commit": "5a2a5cd955b979bc544e3d95f84576751d5361be",
-    "ref": "5a2a5cd955b979bc544e3d95f84576751d5361be",
+    "commit": "5db3d3c39425d5dfe4bfe4a84e6f6e2e5a810ad0",
+    "ref": "5db3d3c39425d5dfe4bfe4a84e6f6e2e5a810ad0",
     "url": "https://git.waozi.xyz/ziranlang/ziran.git"
   }
 }

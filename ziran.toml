@@ -4,7 +4,7 @@ module_roots = ["src", "tests"]
 
 [toolchain]
 git = "https://git.waozi.xyz/ziranlang/ziran.git"
-ref = "5a2a5cd955b979bc544e3d95f84576751d5361be"
+ref = "5db3d3c39425d5dfe4bfe4a84e6f6e2e5a810ad0"
 
 [exports]
 tl = "src/tl.zi"
@@ -19,7 +19,7 @@ session = "src/session.zi"
 
 [dependencies.crypto]
 git = "https://git.waozi.xyz/ziranlang/crypto.git"
-ref = "ba50e2bde7bde53779aec7fdbcd807cc83c69a19"
+ref = "51add53b2ab0bc8f6c1b524f0b62b66e20035c10"
 
 [dependencies.compression]
 git = "https://git.waozi.xyz/ziranlang/compression.git"
