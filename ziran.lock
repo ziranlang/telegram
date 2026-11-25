@@ -2,29 +2,29 @@
   "format": 1,
   "packages": [
     {
-      "commit": "51add53b2ab0bc8f6c1b524f0b62b66e20035c10",
+      "commit": "c42011e3af31505b975e0a62eb89988a79c103fc",
       "dependencies": {},
-      "id": "p2d31be014a415e99",
-      "name": "crypto",
-      "ref": "51add53b2ab0bc8f6c1b524f0b62b66e20035c10",
-      "url": "https://git.waozi.xyz/ziranlang/crypto.git"
-    },
-    {
-      "commit": "b081b26058daac4c61c2f7cb0cdff36496363b18",
-      "dependencies": {},
-      "id": "pd037be58ea81a016",
+      "id": "waozi_xyz_ziranlang_compression_c42011e3af31",
       "name": "compression",
       "ref": "b081b26058daac4c61c2f7cb0cdff36496363b18",
       "url": "https://git.waozi.xyz/ziranlang/compression.git"
+    },
+    {
+      "commit": "4916cd4b750e60e46ff8cc15e1c50d6d27c2c5b9",
+      "dependencies": {},
+      "id": "waozi_xyz_ziranlang_crypto_4916cd4b750e",
+      "name": "crypto",
+      "ref": "51add53b2ab0bc8f6c1b524f0b62b66e20035c10",
+      "url": "https://git.waozi.xyz/ziranlang/crypto.git"
     }
   ],
   "root": {
-    "dependencies": {"compression": "pd037be58ea81a016", "crypto": "p2d31be014a415e99"},
+    "dependencies": {"compression": "waozi_xyz_ziranlang_compression_c42011e3af31", "crypto": "waozi_xyz_ziranlang_crypto_4916cd4b750e"},
     "dependency_refs": {"compression": "b081b26058daac4c61c2f7cb0cdff36496363b18", "crypto": "51add53b2ab0bc8f6c1b524f0b62b66e20035c10"},
     "name": "telegram"
   },
   "toolchain": {
-    "commit": "5db3d3c39425d5dfe4bfe4a84e6f6e2e5a810ad0",
+    "commit": "0affd948205733bc370b6802f9730d8edf5e1e35",
     "ref": "5db3d3c39425d5dfe4bfe4a84e6f6e2e5a810ad0",
     "url": "https://git.waozi.xyz/ziranlang/ziran.git"
   }
